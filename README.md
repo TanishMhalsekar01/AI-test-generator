@@ -4,7 +4,7 @@ An AI tool that reads a Python function, automatically generates its unit tests
 (including edge cases and boundary conditions), runs them for real, and reports
 coverage and potential bugs.
 
-Built for [Hackathon Name] using **IBM Bob** as the primary development environment.
+Built for [SkillUp Hackathon in collaboration with IBM] using **IBM Bob** as the primary development environment.
 
 ---
 
@@ -75,7 +75,7 @@ Coverage: 100%
 
 - **Backend:** Python, FastAPI
 - **Parsing:** Python's built-in `ast` module + lightweight custom static analysis
-- **AI layer:** LLM API (Llama 3.3 70B via Groq) -- structured-prompt based test generation
+- **AI layer:** LLM API (openai/gpt-oss-120b) -- structured-prompt based test generation
 - **Test execution:** pytest + pytest-cov
 - **Development environment:** IBM Bob (see below)
 
@@ -112,10 +112,8 @@ Scoped out deliberately for this build, listed here as an honest roadmap:
 
 - Multi-language support (currently Python only)
 - API/Swagger/GraphQL test generation module
-- Full security testing (SQL injection, XSS, auth bypass)
 - GitHub repo ingestion / CI-CD integration
 - Team dashboards and multi-project history
-- Deeper static analysis (currently a lightweight heuristic + basic checks)
 
 ## Setup
 
