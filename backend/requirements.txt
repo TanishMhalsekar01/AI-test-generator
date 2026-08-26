@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+pytest
+pytest-cov
+pylint
+python-multipart
+requests
