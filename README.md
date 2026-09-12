@@ -1,8 +1,5 @@
 # AI Test Generator
 
-![pytest](https://github.com/<owner>/<repo>/actions/workflows/pytest.yml/badge.svg)
-
-<<<<<<< HEAD
 Built for [SkillUp Hackathon in collaboration with IBM] using **IBM Bob** as the primary development environment.
 =======
 AI Test Generator reads Python source code (or an API spec), extracts structured
