@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Test Generator</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<div class="app-shell">
+
+  <!-- ── Header ──────────────────────────────────────────────────────── -->
+  <header>
+    <div>
+      <div class="logo">AI <span>Test</span> Generator</div>
+      <div class="subtitle">Parse → Generate → Run → Report</div>
+    </div>
+  </header>
+
+  <!-- ── Global error banner ─────────────────────────────────────────── -->
+  <div id="global-banner" class="banner"></div>
+
+  <!-- ── Tabs ────────────────────────────────────────────────────────── -->
+  <div class="tabs" role="tablist">
+    <button class="tab-btn active" data-tab="tab-analyze"      role="tab">🐍 Python File</button>
+    <button class="tab-btn"        data-tab="tab-repo"         role="tab">🐙 GitHub Repo</button>
+    <button class="tab-btn"        data-tab="tab-spec"         role="tab">📄 API Spec</button>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════════════
+       TAB 1 — Upload .py file  →  POST /analyze
+  ══════════════════════════════════════════════════════════════════════ -->
+  <div id="tab-analyze" class="tab-panel active">
+    <div class="card">
+      <div class="card-title">Upload a Python file</div>
+
+      <!-- Drop zone -->
+      <div id="dz-py" class="drop-zone" tabindex="0" role="button"
+           aria-label="Drop a .py file here or click to browse">
+        <input type="file" id="dz-py-input" accept=".py" />
+        <div class="dz-icon">🐍</div>
+        <div class="dz-label">
+          Drop a <strong>.py</strong> file here, or <strong>click to browse</strong>
+        </div>
+        <span id="dz-py-name" class="dz-selected" style="display:none"></span>
+      </div>
+
+      <div style="margin-top:16px;display:flex;gap:10px;align-items:center">
+        <button id="btn-analyze" class="btn btn-primary" disabled>
+          <span class="spinner"></span>
+          <span class="btn-label">Analyze</span>
+        </button>
+        <span style="font-size:12px;color:var(--text-muted)">
+          Parses functions, generates pytest tests, runs them with coverage
+        </span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════════════
+       TAB 2 — GitHub repo  →  POST /analyze-repo
+  ══════════════════════════════════════════════════════════════════════ -->
+  <div id="tab-repo" class="tab-panel">
+    <div class="card">
+      <div class="card-title">Analyze a GitHub repository</div>
+
+      <div class="field">
+        <label for="repo-url">GitHub repository URL</label>
+        <input
+          type="url"
+          id="repo-url"
+          placeholder="https://github.com/owner/repo"
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <div id="repo-url-err" class="inline-error"></div>
+        <div class="hint">Public repos only. Trailing <code>.git</code> and whitespace are stripped automatically.</div>
+      </div>
+
+      <div class="field">
+        <label for="repo-max-files">Max .py files to fetch</label>
+        <input
+          type="number"
+          id="repo-max-files"
+          value="20"
+          min="1"
+          max="200"
+          style="width:120px"
+        />
+        <div class="hint">Caps how many Python files are fetched from the repo (1–200). Remaining files are skipped and reported.</div>
+      </div>
+
+      <div style="display:flex;gap:10px;align-items:center">
+        <button id="btn-analyze-repo" class="btn btn-primary">
+          <span class="spinner"></span>
+          <span class="btn-label">Analyze Repository</span>
+        </button>
+        <span style="font-size:12px;color:var(--text-muted)">
+          May take a minute for larger repos — each file runs the full pipeline
+        </span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════════════
+       TAB 3 — API spec  →  POST /analyze-spec
+  ══════════════════════════════════════════════════════════════════════ -->
+  <div id="tab-spec" class="tab-panel">
+    <div class="card">
+      <div class="card-title">Analyze an API spec</div>
+
+      <!-- Drop zone -->
+      <div id="dz-spec" class="drop-zone" tabindex="0" role="button"
+           aria-label="Drop an OpenAPI or GraphQL SDL file here or click to browse">
+        <input type="file" id="dz-spec-input" accept=".json,.yaml,.yml,.graphql,.gql,.sdl" />
+        <div class="dz-icon">📄</div>
+        <div class="dz-label">
+          Drop an <strong>OpenAPI / Swagger JSON or YAML</strong> or
+          <strong>GraphQL SDL</strong> file, or <strong>click to browse</strong>
+        </div>
+        <span id="dz-spec-name" class="dz-selected" style="display:none"></span>
+      </div>
+
+      <div class="field" style="margin-top:16px">
+        <label for="spec-base-url">
+          Base URL
+          <span style="font-size:11px;font-weight:400;color:var(--text-muted)">(optional — live mode)</span>
+        </label>
+        <input
+          type="url"
+          id="spec-base-url"
+          placeholder="http://localhost:8000"
+          autocomplete="off"
+        />
+        <div class="hint">
+          Leave blank for <strong>mock mode</strong> (HTTP calls are stubbed, no real server needed).
+          Supply a base URL to run tests against a live server.
+        </div>
+      </div>
+
+      <div style="display:flex;gap:10px;align-items:center">
+        <button id="btn-analyze-spec" class="btn btn-primary" disabled>
+          <span class="spinner"></span>
+          <span class="btn-label">Analyze Spec</span>
+        </button>
+        <span style="font-size:12px;color:var(--text-muted)">
+          Generates pytest tests for each endpoint or GraphQL operation
+        </span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════════════
+       Results section — shared across all tabs
+  ══════════════════════════════════════════════════════════════════════ -->
+  <div id="results-section"></div>
+
+</div><!-- /.app-shell -->
+
+<script src="app.js"></script>
+</body>
+</html>
