@@ -6,7 +6,7 @@ API contracts: OpenAPI/Swagger documents, GraphQL schemas and JSON/YAML data, in
 against a running server. Users sign in with GitHub. Every run is stored against their account and
 repositories, so history and team dashboards show only real, recorded results.
 
-- Production URL (after DNS setup): **https://aitestgen.dev**
+- Production URL (after DNS setup): **https://aitestge.stream**
 - Model: Google Gemini **`gemini-3.7-flash`** (server-side only)
 - Stack: FastAPI · SQLAlchemy (Supabase Postgres / SQLite) · vanilla HTML/CSS/JS · Docker on Render
 
@@ -144,7 +144,7 @@ All settings are environment variables. For local development, copy `backend/.en
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | yes | GitHub OAuth App credentials. |
 | `SESSION_SECRET` | production | Random string; encrypts stored GitHub tokens. Auto-generated for local dev. |
 | `DATABASE_URL` | production | Supabase Postgres connection string. Empty = SQLite in `backend/data/`. |
-| `APP_BASE_URL` | yes | Public URL, e.g. `https://aitestgen.dev`. Builds the OAuth callback URL. |
+| `APP_BASE_URL` | yes | Public URL, e.g. `https://aitestge.stream`. Builds the OAuth callback URL. |
 | `APP_ENV` | no | `production` enables HTTPS / `www` redirects, HSTS and secure cookies. |
 | `ALLOWED_HOSTS` | no | Comma-separated Host allowlist (TrustedHostMiddleware). |
 | `ALLOW_PRIVATE_TARGETS` | no | Allow live checks and spec URLs on localhost/private IPs. Default `true` in dev, `false` in production. |
@@ -200,8 +200,8 @@ the key in `backend/.env`. CI runs the suite on every pull request
 ## GitHub OAuth App
 
 1. GitHub → **Settings → Developer settings → OAuth Apps → New OAuth App**.
-2. Homepage URL: `https://aitestgen.dev`
-3. Authorization callback URL: `https://aitestgen.dev/auth/github/callback`
+2. Homepage URL: `https://aitestge.stream`
+3. Authorization callback URL: `https://aitestge.stream/auth/github/callback`
 4. Copy the **Client ID**, generate a **Client secret**, and set both as environment variables.
 
 The app requests `read:user`, `read:org` and `repo`. Those scopes are needed to list organizations
@@ -227,25 +227,25 @@ database connection can.
 
 1. Push this repository to GitHub. In Render: **New → Blueprint** → select the repository.
    [`render.yaml`](render.yaml) creates the Docker web service `ai-test-generator` with a health
-   check at `/healthz` and the domains `aitestgen.dev` and `www.aitestgen.dev`.
+   check at `/healthz` and the domains `aitestge.stream` and `www.aitestge.stream`.
 2. Enter the secret environment variables in the Render dashboard: `GEMINI_API_KEY`,
    `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `DATABASE_URL`. `SESSION_SECRET` is generated
    automatically.
-3. **Register the domain** `aitestgen.dev` with any registrar if you have not already.
+3. **Register the domain** `aitestge.stream` with any registrar if you have not already.
 4. **DNS**: in Render, open the service → **Settings → Custom Domains** and create the records it
    shows at your DNS provider. At the time of writing these are:
 
    | Host | Type | Value |
    |---|---|---|
-   | `aitestgen.dev` (apex) | `A` (or `ALIAS`/`ANAME` → `ai-test-generator.onrender.com`) | `216.24.57.1` |
+   | `aitestge.stream` (apex) | `A` (or `ALIAS`/`ANAME` → `ai-test-generator.onrender.com`) | `216.24.57.1` |
    | `www` | `CNAME` | `ai-test-generator.onrender.com` |
 
    Remove any conflicting `AAAA` records for the apex. Render issues TLS certificates automatically
-   once DNS resolves. `.dev` domains are HTTPS-only (HSTS preloaded), which this app expects.
-5. Update the GitHub OAuth App's callback URL to `https://aitestgen.dev/auth/github/callback`.
+   once DNS resolves. The app forces HTTPS in production (HSTS).
+5. Update the GitHub OAuth App's callback URL to `https://aitestge.stream/auth/github/callback`.
 
 Until DNS is live, set `APP_BASE_URL` to the `https://ai-test-generator.onrender.com` URL and use it
-in the OAuth App. In production, `www.aitestgen.dev` redirects to `aitestgen.dev` and HTTP redirects
+in the OAuth App. In production, `www.aitestge.stream` redirects to `aitestge.stream` and HTTP redirects
 to HTTPS.
 
 ---
