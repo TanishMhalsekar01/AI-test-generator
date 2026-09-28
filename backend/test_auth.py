@@ -74,7 +74,7 @@ def test_callback_creates_session_and_encrypts_token(anon_client):
     anon_client.cookies.set(auth.SESSION_COOKIE, raw)
     me = anon_client.get("/api/me").json()
     assert me["login"] == "octo"
-    assert me["model"] == "gemini-3.7-flash"
+    assert me["model"] == "gemini-2.5-pro"
     assert "test-gemini-key" not in str(me)  # the key never reaches the browser
 
 
@@ -109,3 +109,36 @@ def test_revoked_github_token_ends_session(signed_in_client):
         resp = signed_in_client.get("/api/github/repos")
     assert resp.status_code == 401
     assert db.get_session_user(auth.hash_session_id(raw)) is None
+
+
+def test_login_from_other_host_moves_to_base_url_host(anon_client, monkeypatch):
+    # The state cookie must live on the APP_BASE_URL host, where GitHub sends the user back.
+    monkeypatch.setattr(auth, "host_resolves", lambda host: True)
+    resp = anon_client.get("/auth/github/login", headers={"host": "ai-test-generator-6bv7.onrender.com"},
+                           follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "http://testserver/auth/github/login"
+    assert auth.STATE_COOKIE not in resp.cookies
+
+
+def test_login_explains_unreachable_base_url(anon_client, monkeypatch):
+    monkeypatch.setattr(auth, "host_resolves", lambda host: False)
+    resp = anon_client.get("/auth/github/login", headers={"host": "ai-test-generator-6bv7.onrender.com"},
+                           follow_redirects=False)
+    assert resp.headers["location"] == "/?error=base_url_unreachable"
+
+
+def test_auth_status_reports_configuration(anon_client, monkeypatch):
+    monkeypatch.setattr(auth, "host_resolves", lambda host: False)
+    status = anon_client.get("/auth/status", headers={"host": "elsewhere.example"}).json()
+    assert status == {"oauth_configured": True, "app_base_url": "http://testserver",
+                      "on_base_host": False, "base_host_resolves": False}
+    assert anon_client.get("/auth/status").json()["on_base_host"] is True
+
+
+def test_production_http_redirects_to_https_on_same_host(anon_client, monkeypatch):
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("APP_BASE_URL", "https://aitestge.stream")
+    resp = anon_client.get("/app", headers={"host": "ai-test-generator-6bv7.onrender.com"}, follow_redirects=False)
+    assert resp.status_code == 301
+    assert resp.headers["location"] == "https://ai-test-generator-6bv7.onrender.com/app"

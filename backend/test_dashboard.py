@@ -9,7 +9,7 @@ import github_api
 def _completed_run(user_id, login, project, owner=None, kind="repo", findings=3, failed=1):
     db.upsert_user({"id": user_id, "login": login, "name": None, "avatar_url": None})
     run_id = db.create_run(user_id=user_id, user_login=login, kind=kind, project=project, owner=owner,
-                           ref="main", commit_sha="b" * 40, model="gemini-3.7-flash")
+                           ref="main", commit_sha="b" * 40, model="gemini-2.5-pro")
     db.update_run(run_id, status="completed", report={"files": []}, finished_at=db.now(), duration_ms=1200,
                   summary={"findings": findings, "critical": 1, "high": 1, "tests_passed": 4, "tests_failed": failed})
     return run_id
@@ -111,3 +111,14 @@ def test_interrupted_runs_marked_failed():
     db.update_run(run_id, status="running")
     db.mark_interrupted_runs()
     assert db.get_run(run_id)["status"] == "failed"
+
+
+def test_nul_characters_are_stripped_before_storing():
+    # Postgres rejects NUL in text/JSONB; uploaded files or tool output may contain it.
+    db.upsert_user({"id": 999006, "login": "nul", "name": None, "avatar_url": None})
+    run_id = db.create_run(user_id=999006, user_login="nul", kind="code", project="a\x00b")
+    db.update_run(run_id, status="completed", error="x\x00y", report={"files": [{"source": "print(1)\x00"}]},
+                  summary={"note": "\x00"})
+    row = db.get_run(run_id)
+    assert row["project"] == "ab" and row["error"] == "xy"
+    assert row["report"]["files"][0]["source"] == "print(1)" and row["summary"]["note"] == ""

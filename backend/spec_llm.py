@@ -80,10 +80,15 @@ def generate_spec_tests(op: OperationInfo, base_url: str = "") -> str:
     Raises gemini_client.GeminiError when the model is not configured or
     unavailable — callers report that instead of substituting placeholder tests.
     """
+    return generate_spec_suite(op, base_url)[0]
+
+
+def generate_spec_suite(op: OperationInfo, base_url: str = "") -> tuple[str, str]:
+    """Like generate_spec_tests, also returning the model that answered."""
     result = gemini_client.generate(SPEC_SYSTEM_PROMPT, build_spec_user_prompt(op, base_url=base_url),
                                     max_output_tokens=8192)
     code = gemini_client.strip_fences(result.text)
     missing = [imp for imp in _REQUIRED_IMPORTS if not re.search(rf"^{imp}\b", code, re.M)]
     if missing:
         code = "\n".join(missing) + "\n" + code
-    return code
+    return code, result.model

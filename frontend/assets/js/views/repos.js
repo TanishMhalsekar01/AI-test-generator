@@ -1,11 +1,11 @@
 // Repositories: analyze any repository the signed-in GitHub account can read.
 import { api, postJSON } from '../api.js';
 import { h, relTime, fmtNum } from '../dom.js';
-import { pageHead, card, banner, dataTable, loading } from '../components.js';
+import { pageHead, card, banner, dataTable, loading, modelLabel } from '../components.js';
 
 export async function render(root, { me, navigate, query }) {
   root.append(pageHead('Repositories',
-    `Analyze a GitHub repository at the current commit of a branch. Source files in every language are selected (vendor, build output and generated files are skipped), reviewed by ${me.model}, and tested where a sandbox runner exists.`));
+    `Analyze a GitHub repository at the current commit of a branch. Source files in every language are selected (vendor, build output and generated files are skipped), reviewed by ${modelLabel(me)}, and tested where a sandbox runner exists.`));
 
   const errorSlot = h('div');
   const repoInput = h('input', { class: 'input', id: 'repo', placeholder: 'owner/name or https://github.com/owner/name', autocomplete: 'off', spellcheck: 'false', value: query.repo || '' });

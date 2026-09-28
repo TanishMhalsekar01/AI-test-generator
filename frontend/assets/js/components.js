@@ -46,6 +46,12 @@ export function statusBadge(status, labelOverride) {
   return h('span', { class: `badge status-${status}` }, icon(ic), labelOverride || label);
 }
 
+// "gemini-2.5-pro (or gemini-3.6-flash, … when it is unavailable)" for page descriptions.
+export function modelLabel(me) {
+  const fallbacks = me.fallback_models || [];
+  return fallbacks.length ? `${me.model} (or ${fallbacks.join(', ')} when it is unavailable)` : me.model;
+}
+
 export const KIND_LABEL = { code: 'Code review', repo: 'Repository', spec: 'API & specs' };
 
 export function banner(type, title, text, extra) {

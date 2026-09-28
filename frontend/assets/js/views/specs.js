@@ -1,7 +1,7 @@
 // API & specs: OpenAPI / Swagger, GraphQL SDL, JSON / YAML with JSON Schema.
 import { postForm } from '../api.js';
 import { h } from '../dom.js';
-import { pageHead, card, banner } from '../components.js';
+import { pageHead, card, banner, modelLabel } from '../components.js';
 
 export async function render(root, { me, navigate }) {
   root.append(pageHead('API & specs',
@@ -44,7 +44,7 @@ export async function render(root, { me, navigate }) {
       h('div', { class: 'field' }, h('label', { class: 'field-label', for: 'spec-project', text: 'Project name (optional)' }), project)),
     h('label', { class: 'check' }, mutations, h('span', {}, 'Send write requests (POST, PUT, PATCH, DELETE) during live checks ',
       h('span', { class: 'muted', text: '— only against a test environment' }))),
-    h('label', { class: 'check' }, generate, h('span', {}, `Generate a pytest suite per operation with ${me.model}`)),
+    h('label', { class: 'check' }, generate, h('span', {}, `Generate a pytest suite per operation with ${modelLabel(me)}`)),
     errorSlot,
     h('div', { class: 'actions' }, submit));
 

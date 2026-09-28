@@ -15,7 +15,9 @@ from pathlib import Path
 
 _TMP = Path(tempfile.mkdtemp(prefix="aitg-tests-"))
 os.environ["GEMINI_API_KEY"] = "test-gemini-key-000000"
-os.environ["GEMINI_MODEL"] = "gemini-3.7-flash"
+os.environ["GEMINI_MODEL"] = "gemini-2.5-pro"
+# Strict single model by default; fallback tests set GEMINI_FALLBACK_MODELS themselves.
+os.environ["GEMINI_FALLBACK_MODELS"] = ""
 os.environ["DATABASE_URL"] = f"sqlite:///{_TMP / 'test.db'}"
 os.environ["SESSION_SECRET"] = "test-session-secret-for-pytest-only"
 os.environ["APP_ENV"] = "development"
