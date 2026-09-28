@@ -10,13 +10,13 @@ services:
     healthCheckPath: /healthz
     autoDeploy: true
     domains:
-      - aitestgen.dev
-      - www.aitestgen.dev
+      - aitestge.stream
+      - www.aitestge.stream
     envVars:
       - key: APP_ENV
         value: production
       - key: APP_BASE_URL
-        value: https://aitestgen.dev
+        value: https://aitestge.stream
       - key: GEMINI_MODEL
         value: gemini-3.7-flash
       - key: GEMINI_API_KEY
