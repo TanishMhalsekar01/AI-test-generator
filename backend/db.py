@@ -206,13 +206,26 @@ def create_run(*, user_id: int, user_login: str, kind: str, project: str, owner:
     with get_engine().begin() as conn:
         conn.execute(insert(runs).values(
             id=run_id, user_id=user_id, user_login=user_login, kind=kind, status="queued",
-            project=project[:300], owner=owner, ref=ref, commit_sha=commit_sha, model=model,
+            project=strip_nul(project)[:300], owner=owner, ref=ref, commit_sha=commit_sha, model=model,
             progress=0, created_at=now(),
         ))
     return run_id
 
 
+def strip_nul(value: Any) -> Any:
+    """Postgres text and JSONB reject NUL characters (SQLite accepts them). Uploaded
+    files, compiler output or model text can contain them, so drop them before storing."""
+    if isinstance(value, str):
+        return value.replace("\x00", "")
+    if isinstance(value, dict):
+        return {strip_nul(k): strip_nul(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [strip_nul(v) for v in value]
+    return value
+
+
 def update_run(run_id: str, **values: Any) -> None:
+    values = {k: strip_nul(v) for k, v in values.items()}
     with get_engine().begin() as conn:
         conn.execute(update(runs).where(runs.c.id == run_id).values(**values))
 

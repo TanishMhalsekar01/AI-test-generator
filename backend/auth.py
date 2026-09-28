@@ -11,6 +11,8 @@ import base64
 import hashlib
 import hmac
 import secrets
+import socket
+import time
 from dataclasses import dataclass
 from typing import Optional
 from urllib.parse import urlencode
@@ -108,11 +110,53 @@ def current_user(request: Request) -> CurrentUser:
 # Routes
 # ---------------------------------------------------------------------------
 
+_DNS_CACHE: dict[str, tuple[float, bool]] = {}
+
+
+def host_resolves(host: str) -> bool:
+    """Whether *host* has a DNS record (cached for a minute)."""
+    name = host.split(":")[0]
+    hit = _DNS_CACHE.get(name)
+    if hit and time.monotonic() - hit[0] < 60:
+        return hit[1]
+    try:
+        socket.getaddrinfo(name, None)
+        ok = True
+    except OSError:
+        ok = False
+    _DNS_CACHE[name] = (time.monotonic(), ok)
+    return ok
+
+
+def _request_host(request: Request) -> str:
+    return request.headers.get("host", "").lower()
+
+
+@router.get("/auth/status", include_in_schema=False)
+def auth_status(request: Request) -> dict:
+    """Public sign-in configuration, so the sign-in page can explain setup problems."""
+    settings = get_settings()
+    canonical = settings.canonical_host.lower()
+    return {
+        "oauth_configured": settings.oauth_configured,
+        "app_base_url": settings.app_base_url,
+        "on_base_host": _request_host(request) == canonical,
+        "base_host_resolves": host_resolves(canonical) if canonical else False,
+    }
+
+
 @router.get("/auth/github/login", include_in_schema=False)
-def github_login() -> RedirectResponse:
+def github_login(request: Request) -> RedirectResponse:
     settings = get_settings()
     if not settings.oauth_configured:
         return RedirectResponse("/?error=oauth_not_configured", status_code=303)
+    # GitHub returns to APP_BASE_URL, and the state cookie must be set on that same
+    # host or the callback cannot verify it. Start sign-in there.
+    canonical = settings.canonical_host.lower()
+    if canonical and _request_host(request) != canonical:
+        if not host_resolves(canonical):
+            return RedirectResponse("/?error=base_url_unreachable", status_code=303)
+        return RedirectResponse(f"{settings.app_base_url}/auth/github/login", status_code=303)
     state = secrets.token_urlsafe(32)
     query = urlencode({
         "client_id": settings.github_client_id,

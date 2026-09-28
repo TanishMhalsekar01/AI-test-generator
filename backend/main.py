@@ -72,12 +72,14 @@ async def edge_policies(request: Request, call_next):
     s = get_settings()
     path = request.url.path
     if s.is_production and path != "/healthz":
-        host = request.headers.get("host", "").split(":")[0]
-        # www.<domain> -> <domain>; other hosts (e.g. *.onrender.com) keep working before DNS is live.
-        wrong_host = bool(s.canonical_host) and host == f"www.{s.canonical_host}"
-        if request.url.scheme != "https" or wrong_host:
-            target = f"https://{s.canonical_host}{path}" + (f"?{request.url.query}" if request.url.query else "")
-            return RedirectResponse(target, status_code=301)
+        host = request.headers.get("host", "")
+        query = f"?{request.url.query}" if request.url.query else ""
+        # www.<domain> -> <domain>. Other hosts (e.g. *.onrender.com) keep working,
+        # so the service stays reachable before the custom domain's DNS is live.
+        if s.canonical_host and host.split(":")[0] == f"www.{s.canonical_host}":
+            return RedirectResponse(f"https://{s.canonical_host}{path}{query}", status_code=301)
+        if request.url.scheme != "https":
+            return RedirectResponse(f"https://{host or s.canonical_host}{path}{query}", status_code=301)
     response = await call_next(request)
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")

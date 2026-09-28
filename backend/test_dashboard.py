@@ -111,3 +111,14 @@ def test_interrupted_runs_marked_failed():
     db.update_run(run_id, status="running")
     db.mark_interrupted_runs()
     assert db.get_run(run_id)["status"] == "failed"
+
+
+def test_nul_characters_are_stripped_before_storing():
+    # Postgres rejects NUL in text/JSONB; uploaded files or tool output may contain it.
+    db.upsert_user({"id": 999006, "login": "nul", "name": None, "avatar_url": None})
+    run_id = db.create_run(user_id=999006, user_login="nul", kind="code", project="a\x00b")
+    db.update_run(run_id, status="completed", error="x\x00y", report={"files": [{"source": "print(1)\x00"}]},
+                  summary={"note": "\x00"})
+    row = db.get_run(run_id)
+    assert row["project"] == "ab" and row["error"] == "xy"
+    assert row["report"]["files"][0]["source"] == "print(1)" and row["summary"]["note"] == ""
