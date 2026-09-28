@@ -23,6 +23,8 @@ jobs:
           cache: "pip"
           cache-dependency-path: backend/requirements.txt
 
+      # The test suite runs the real sandbox runners for each language, so pin the
+      # toolchains instead of relying on whatever the runner image happens to ship.
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
@@ -34,10 +36,28 @@ jobs:
           go-version: "1.24"
           cache: false
 
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # All Gemini and GitHub calls are mocked; the language runners (pytest, node, go,
-      # ruby, rustc) are real and preinstalled on the runner.
+      - name: Toolchain versions
+        run: |
+          python --version
+          node --version
+          go version
+          ruby --version
+          rustc --version
+          gcc --version | head -1
+          javac -version 2>&1 || true
+
+      # Gemini and GitHub calls are mocked; compilers and test runners are real.
+      # -ra lists skipped tests with their reason (e.g. a missing toolchain).
       - name: Run tests
-        run: python -m pytest -q --tb=short
+        run: python -m pytest -q --tb=short -ra
