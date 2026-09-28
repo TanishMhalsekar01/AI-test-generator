@@ -85,3 +85,48 @@ def test_json_and_yaml_syntax_errors():
     assert json_syntax_error('{"a": 1,}')["line"] == 1
     assert yaml_syntax_error("a: [1, 2\nb: 3\n")["line"] is not None
     assert json_syntax_error('{"a": 1}') is None
+
+
+# Output shapes differ across Ruby versions; CI runners and servers do not all run the same one.
+RUBY_PARSE_Y_32 = """x.rb: --> x.rb
+Unmatched `(', missing `)' ?
+> 1  def f(
+  3  end
+x.rb:2: syntax error, unexpected integer literal, expecting ')' (SyntaxError)
+"""
+RUBY_PARSE_Y_33 = "ruby: x.rb:2: syntax error, unexpected integer literal, expecting ')' (SyntaxError)\n"
+RUBY_PRISM_34 = """ruby: x.rb:3: syntax errors found (SyntaxError)
+  1 | def f(
+> 2 |   1
+    |   ^ unexpected integer; expected a `)` to close the parameters
+  3 | end
+"""
+
+
+@pytest.mark.parametrize("output,line,text", [
+    (RUBY_PARSE_Y_32, 2, "unexpected integer literal"),
+    (RUBY_PARSE_Y_33, 2, "unexpected integer literal"),
+    (RUBY_PRISM_34, 2, "expected a `)`"),
+])
+def test_parse_ruby_check_across_versions(output, line, text):
+    from static_checks import parse_ruby_check
+    diags = parse_ruby_check(output, "x.rb")
+    errors = [d for d in diags if d.severity == "error"]
+    assert errors and errors[0].line == line and text in errors[0].message
+
+
+def test_parse_ruby_check_warning():
+    from static_checks import parse_ruby_check
+    diags = parse_ruby_check("x.rb:5: warning: assigned but unused variable - y\nSyntax OK\n", "x.rb")
+    assert diags[0].severity == "warning" and diags[0].line == 5
+
+
+def test_unrecognised_failure_output_still_reports_error():
+    import sandbox
+    from static_checks import _fallback
+    res = sandbox.ProcResult(returncode=1, stdout="", stderr="weird format: Error at x.rb:7: boom\n",
+                             timed_out=False, duration_ms=1)
+    diags = _fallback(res, [], "tool")
+    assert diags[0].severity == "error" and diags[0].line == 7
+    ok = sandbox.ProcResult(returncode=0, stdout="", stderr="", timed_out=False, duration_ms=1)
+    assert _fallback(ok, [], "tool") == []

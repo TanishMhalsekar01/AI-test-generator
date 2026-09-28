@@ -188,7 +188,7 @@ cd backend
 python -m pytest -q
 ```
 
-177 tests cover auth and sessions, the Gemini client (retries, quota handling, key redaction),
+183 tests cover auth and sessions, the Gemini client (retries, quota handling, key redaction),
 compiler and linter parsing, the real sandbox runners for every supported language, the review
 pipeline, repository selection, spec linting, live contract checks (HTTP mocked with `responses`),
 and history/team access control. Gemini and GitHub are always mocked, and the test suite never uses

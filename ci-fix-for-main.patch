@@ -1,0 +1,2298 @@
+diff --git a/.github/workflows/pytest.yml b/.github/workflows/pytest.yml
+index 6fe0ca9..daac901 100644
+--- a/.github/workflows/pytest.yml
++++ b/.github/workflows/pytest.yml
+@@ -23,6 +23,8 @@ jobs:
+           cache: "pip"
+           cache-dependency-path: backend/requirements.txt
+ 
++      # The test suite runs the real sandbox runners for each language, so pin the
++      # toolchains instead of relying on whatever the runner image happens to ship.
+       - name: Set up Node.js
+         uses: actions/setup-node@v4
+         with:
+@@ -34,10 +36,28 @@ jobs:
+           go-version: "1.24"
+           cache: false
+ 
++      - name: Set up Ruby
++        uses: ruby/setup-ruby@v1
++        with:
++          ruby-version: "3.3"
++
++      - name: Set up Rust
++        uses: dtolnay/rust-toolchain@stable
++
+       - name: Install dependencies
+         run: pip install -r requirements.txt
+ 
+-      # All Gemini and GitHub calls are mocked; the language runners (pytest, node, go,
+-      # ruby, rustc) are real and preinstalled on the runner.
++      - name: Toolchain versions
++        run: |
++          python --version
++          node --version
++          go version
++          ruby --version
++          rustc --version
++          gcc --version | head -1
++          javac -version 2>&1 || true
++
++      # Gemini and GitHub calls are mocked; compilers and test runners are real.
++      # -ra lists skipped tests with their reason (e.g. a missing toolchain).
+       - name: Run tests
+-        run: python -m pytest -q --tb=short
++        run: python -m pytest -q --tb=short -ra
+diff --git a/README.md b/README.md
+index a926109..cc96782 100644
+--- a/README.md
++++ b/README.md
+@@ -188,7 +188,7 @@ cd backend
+ python -m pytest -q
+ ```
+ 
+-177 tests cover auth and sessions, the Gemini client (retries, quota handling, key redaction),
++183 tests cover auth and sessions, the Gemini client (retries, quota handling, key redaction),
+ compiler and linter parsing, the real sandbox runners for every supported language, the review
+ pipeline, repository selection, spec linting, live contract checks (HTTP mocked with `responses`),
+ and history/team access control. Gemini and GitHub are always mocked, and the test suite never uses
+diff --git a/backend/github_fetcher.py b/backend/github_fetcher.py
+deleted file mode 100644
+index bf16c78..0000000
+--- a/backend/github_fetcher.py
++++ /dev/null
+@@ -1,152 +0,0 @@
+-"""
+-GitHub Repo Fetcher
+-Fetches Python source files from a public GitHub repository using the GitHub
+-Contents API.  No authentication required for public repos; optionally uses
+-GITHUB_TOKEN to raise the rate limit from 60 to 5 000 req/h.
+-"""
+-
+-import os
+-import re
+-import base64
+-from typing import NamedTuple
+-
+-import requests
+-
+-
+-# Regex that accepts both github.com URL styles:
+-#   https://github.com/owner/repo
+-#   https://github.com/owner/repo.git
+-_GITHUB_URL_RE = re.compile(
+-    r"^https?://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/\s]+?)(?:\.git)?$"
+-)
+-
+-_API_BASE = "https://api.github.com"
+-_TIMEOUT = 15  # seconds per request
+-
+-
+-class GitHubFile(NamedTuple):
+-    path: str      # relative path inside the repo, e.g. "src/utils.py"
+-    source: str    # decoded UTF-8 source text
+-
+-
+-def _auth_headers() -> dict:
+-    token = os.environ.get("GITHUB_TOKEN")
+-    if token:
+-        return {"Authorization": f"Bearer {token}"}
+-    return {}
+-
+-
+-def parse_github_url(url: str) -> tuple[str, str]:
+-    """
+-    Parse a GitHub repo URL and return (owner, repo).
+-    Raises ValueError for unrecognised URLs.
+-    """
+-    m = _GITHUB_URL_RE.match(url.strip())
+-    if not m:
+-        raise ValueError(
+-            f"Not a recognised public GitHub URL: {url!r}. "
+-            "Expected https://github.com/owner/repo"
+-        )
+-    return m.group("owner"), m.group("repo")
+-
+-
+-def _get_default_branch(owner: str, repo: str) -> str:
+-    """Return the default branch name for the given repo."""
+-    resp = requests.get(
+-        f"{_API_BASE}/repos/{owner}/{repo}",
+-        headers=_auth_headers(),
+-        timeout=_TIMEOUT,
+-    )
+-    resp.raise_for_status()
+-    return resp.json()["default_branch"]
+-
+-
+-def _list_python_files(owner: str, repo: str, branch: str) -> list[dict]:
+-    """
+-    Use the Git Trees API (recursive) to list every .py file in the repo.
+-    Returns a list of tree-entry dicts (each has 'path' and 'url').
+-    """
+-    resp = requests.get(
+-        f"{_API_BASE}/repos/{owner}/{repo}/git/trees/{branch}",
+-        headers=_auth_headers(),
+-        params={"recursive": "1"},
+-        timeout=_TIMEOUT,
+-    )
+-    resp.raise_for_status()
+-    data = resp.json()
+-    return [
+-        entry for entry in data.get("tree", [])
+-        if entry.get("type") == "blob" and entry["path"].endswith(".py")
+-    ]
+-
+-
+-def _fetch_file_content(owner: str, repo: str, path: str) -> str | None:
+-    """
+-    Fetch a single file via the Contents API and return decoded UTF-8 text.
+-    Returns None if the file cannot be decoded or is binary.
+-    """
+-    resp = requests.get(
+-        f"{_API_BASE}/repos/{owner}/{repo}/contents/{path}",
+-        headers=_auth_headers(),
+-        timeout=_TIMEOUT,
+-    )
+-    resp.raise_for_status()
+-    data = resp.json()
+-    raw = data.get("content", "")
+-    encoding = data.get("encoding", "base64")
+-    if encoding != "base64":
+-        return None
+-    try:
+-        return base64.b64decode(raw).decode("utf-8")
+-    except (ValueError, UnicodeDecodeError):
+-        return None
+-
+-
+-def fetch_python_files(
+-    github_url: str,
+-    max_files: int = 50,
+-    _return_total: bool = False,
+-):
+-    """
+-    Fetch up to *max_files* Python source files from a public GitHub repo.
+-
+-    Parameters
+-    ----------
+-    github_url:
+-        Full HTTPS URL of the repo, e.g. ``https://github.com/owner/repo``.
+-    max_files:
+-        Safety cap so a single request cannot hammer the GitHub API
+-        indefinitely.  Defaults to 50.
+-    _return_total:
+-        Internal flag.  When True, returns a ``(files, total_found)`` tuple
+-        where ``total_found`` is the number of eligible .py files discovered
+-        before the cap was applied.  Defaults to False (returns list only),
+-        preserving backward compatibility for all existing callers.
+-
+-    Returns
+-    -------
+-    List of :class:`GitHubFile` named-tuples with ``path`` and ``source``,
+-    or ``(list, int)`` when *_return_total* is True.
+-
+-    Raises
+-    ------
+-    ValueError
+-        If the URL cannot be parsed as a GitHub repo URL.
+-    requests.HTTPError
+-        On non-2xx responses from the GitHub API.
+-    """
+-    owner, repo = parse_github_url(github_url)
+-    branch = _get_default_branch(owner, repo)
+-    entries = _list_python_files(owner, repo, branch)
+-
+-    total_found = len(entries)
+-
+-    files: list[GitHubFile] = []
+-    for entry in entries[:max_files]:
+-        source = _fetch_file_content(owner, repo, entry["path"])
+-        if source is not None:
+-            files.append(GitHubFile(path=entry["path"], source=source))
+-
+-    if _return_total:
+-        return files, total_found
+-    return files
+diff --git a/backend/llm.py b/backend/llm.py
+deleted file mode 100644
+index a28e9f8..0000000
+--- a/backend/llm.py
++++ /dev/null
+@@ -1,120 +0,0 @@
+-"""
+-Stage 3 — LLM Test Generation
+-Calls the Groq API (llama-3.3-70b-versatile) to generate pytest unit tests for
+-a given FunctionInfo.  Falls back to _mock_generate() when GROQ_API_KEY is not
+-set or the API call fails.
+-"""
+-
+-import os
+-import re
+-import requests
+-
+-from parser import FunctionInfo
+-
+-# ---------------------------------------------------------------------------
+-# Prompt templates
+-# ---------------------------------------------------------------------------
+-
+-SYSTEM_PROMPT = """\
+-You are an expert Python test engineer.
+-Given metadata about a Python function, write a complete pytest test module.
+-Rules:
+-- Use only pytest (no unittest).
+-- Name every test function test_<something>.
+-- Do NOT import the function under test; assume it is already in scope.
+-- Output ONLY the Python code — no prose, no markdown fences.\
+-"""
+-
+-
+-def build_user_prompt(info: FunctionInfo) -> str:
+-    """Build the user-turn prompt from a FunctionInfo."""
+-    lines = [
+-        f"Function signature : {info.signature}",
+-        f"Docstring          : {info.docstring or '(none)'}",
+-        f"Logic summary      : {info.logic_summary()}",
+-        f"Flags              : {', '.join(info.flags) or '(none)'}",
+-        "",
+-        "Write pytest tests for this function.",
+-    ]
+-    return "\n".join(lines)
+-
+-
+-# ---------------------------------------------------------------------------
+-# Helpers
+-# ---------------------------------------------------------------------------
+-
+-def _strip_markdown_fences(text: str) -> str:
+-    """Remove leading/trailing ```python … ``` fences if present."""
+-    text = text.strip()
+-    text = re.sub(r"^```(?:python)?\n?", "", text)
+-    text = re.sub(r"\n?```$", "", text)
+-    return text.strip()
+-
+-
+-def _mock_generate(info: FunctionInfo, module_import_name) -> str:
+-    """Return a minimal placeholder test when no LLM is available."""
+-    return (
+-        f"# Mock tests for {info.name}\n"
+-        f"def test_{info.name}_placeholder():\n"
+-        f"    pass\n"
+-    )
+-
+-
+-# ---------------------------------------------------------------------------
+-# Public API
+-# ---------------------------------------------------------------------------
+-
+-def generate_tests(info: FunctionInfo, module_import_name: str = "target") -> str:
+-    """
+-    Generate pytest test code for *info*.
+-
+-    Uses the Groq chat-completions API when GROQ_API_KEY is set; otherwise
+-    falls back to _mock_generate().
+-    """
+-    api_key = os.environ.get("GROQ_API_KEY")
+-    if not api_key:
+-        return _mock_generate(info, module_import_name)
+-
+-    user_prompt = build_user_prompt(info)
+-    
+-    try:
+-        response = requests.post(
+-            "https://api.groq.com/openai/v1/chat/completions",
+-            headers={
+-                "Authorization": f"Bearer {api_key}",
+-                "Content-Type": "application/json",
+-            },
+-            json={
+-                "model": "llama-3.3-70b-versatile",
+-                "messages": [
+-                    {"role": "system", "content": SYSTEM_PROMPT},
+-                    {"role": "user", "content": user_prompt},
+-                ],
+-                "temperature": 0.2,
+-                "max_tokens": 800,
+-            },
+-            timeout=30,
+-        )
+-        response.raise_for_status()
+-        response_json = response.json()
+-        raw_text = response_json["choices"][0]["message"]["content"]
+-    except Exception as exc:
+-        print(f"[llm] Groq API call failed ({exc}); falling back to mock output.")
+-        return _mock_generate(info, module_import_name)
+-
+-    code = _strip_markdown_fences(raw_text)
+-
+-    # Drop any stray import lines the model may have emitted — we'll
+-    # re-add the ones we need ourselves so they are always present.
+-    code = "\n".join(
+-        line for line in code.splitlines()
+-        if not line.startswith("import ") and not line.startswith("from ")
+-    )
+-
+-    # Always prepend the two required imports regardless of what the model produced.
+-    code = (
+-        f"import pytest\n"
+-        f"from {module_import_name} import {info.name}\n\n"
+-        + code
+-    )
+-    return code
+diff --git a/backend/requirement.txt b/backend/requirement.txt
+deleted file mode 100644
+index bf6e0d0..0000000
+--- a/backend/requirement.txt
++++ /dev/null
+@@ -1,10 +0,0 @@
+-fastapi
+-uvicorn
+-pytest
+-pytest-cov
+-pylint
+-python-multipart
+-requests
+-httpx2
+-pyyaml
+-aiofiles
+\ No newline at end of file
+diff --git a/backend/runner.py b/backend/runner.py
+deleted file mode 100644
+index ca70d44..0000000
+--- a/backend/runner.py
++++ /dev/null
+@@ -1,77 +0,0 @@
+-"""
+-Stage 4 — Test Runner
+-Writes generated test code to a temporary directory and executes it with
+-pytest + pytest-cov, returning a structured results dict.
+-"""
+-
+-import json
+-import sys 
+-import subprocess
+-import tempfile
+-from pathlib import Path
+-
+-
+-def run_generated_tests(
+-    target_source: str,
+-    test_source: str,
+-    module_name: str = "target",
+-) -> dict:
+-    """
+-    Write *target_source* and *test_source* to a temp directory, run pytest
+-    with coverage, and return a results dict with the keys:
+-        tests_generated, tests_passed, tests_failed, coverage_percent, raw_output
+-    """
+-    try:
+-        with tempfile.TemporaryDirectory() as tmp_dir:
+-            tmp_path = Path(tmp_dir)
+-
+-            # Write source files
+-            (tmp_path / f"{module_name}.py").write_text(target_source, encoding="utf-8")
+-            (tmp_path / "test_generated.py").write_text(test_source, encoding="utf-8")
+-
+-            # Run pytest with coverage
+-            result = subprocess.run(
+-                [
+-                    sys.executable, "-m", "pytest", "test_generated.py",
+-                    f"--cov={module_name}",
+-                    "--cov-report=json",
+-                    "-v",
+-                    "--tb=short",
+-                ],
+-                cwd=tmp_dir,
+-                capture_output=True,
+-                text=True,
+-                timeout=30,
+-            )
+-
+-            raw_output = result.stdout + result.stderr
+-
+-            tests_passed = raw_output.count("PASSED")
+-            tests_failed = raw_output.count("FAILED")
+-
+-            # Extract coverage from coverage.json if present
+-            coverage_percent = 0.0
+-            coverage_json_path = tmp_path / "coverage.json"
+-            if coverage_json_path.exists():
+-                try:
+-                    coverage_data = json.loads(coverage_json_path.read_text(encoding="utf-8"))
+-                    coverage_percent = float(coverage_data["totals"]["percent_covered"])
+-                except (KeyError, TypeError, ValueError):
+-                    coverage_percent = 0.0
+-
+-            return {
+-                "tests_generated": tests_passed + tests_failed,
+-                "tests_passed": tests_passed,
+-                "tests_failed": tests_failed,
+-                "coverage_percent": coverage_percent,
+-                "raw_output": raw_output,
+-            }
+-
+-    except Exception as exc:
+-        return {
+-            "tests_generated": 0,
+-            "tests_passed": 0,
+-            "tests_failed": 0,
+-            "coverage_percent": 0.0,
+-            "raw_output": str(exc),
+-        }
+diff --git a/backend/sample.py b/backend/sample.py
+deleted file mode 100644
+index d0fc380..0000000
+--- a/backend/sample.py
++++ /dev/null
+@@ -1,6 +0,0 @@
+-def safe_divide(a, b):
+-    try:
+-        result = a / b
+-    except ZeroDivisionError:
+-        return None
+-    return result
+\ No newline at end of file
+diff --git a/backend/sandbox.py b/backend/sandbox.py
+index 137a142..ab77823 100644
+--- a/backend/sandbox.py
++++ b/backend/sandbox.py
+@@ -31,8 +31,13 @@ except ImportError:  # pragma: no cover - non-POSIX
+ 
+ MAX_OUTPUT_CHARS = 20000
+ 
+-_PASS_THROUGH = ("PATH", "LANG", "LC_ALL", "JAVA_HOME", "GOROOT", "RUSTUP_HOME", "CARGO_HOME", "NODE_PATH")
++_PASS_THROUGH = ("PATH", "LANG", "LC_ALL", "JAVA_HOME", "GOROOT", "RUSTUP_HOME", "CARGO_HOME", "NODE_PATH",
++                 "GEM_HOME", "GEM_PATH")
+ _SHARED_CACHE = Path(tempfile.gettempdir()) / "aitestgen-cache"
++# Toolchain managers that locate their installs under $HOME. The sandbox replaces
++# HOME with the throwaway workdir, so point them at the real locations instead
++# (e.g. rustup on GitHub runners keeps toolchains in ~/.rustup without RUSTUP_HOME set).
++_HOME_TOOLCHAINS = {"RUSTUP_HOME": ".rustup", "CARGO_HOME": ".cargo"}
+ 
+ 
+ @dataclass
+@@ -66,6 +71,11 @@ def _sandbox_ids() -> Optional[tuple[int, int]]:
+ def scrubbed_env(workdir: Path, extra: Optional[dict] = None) -> dict:
+     env = {k: os.environ[k] for k in _PASS_THROUGH if k in os.environ}
+     env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
++    if _sandbox_ids() is None:  # a dropped-privilege sandbox user cannot read our home anyway
++        real_home = Path.home()
++        for var, sub in _HOME_TOOLCHAINS.items():
++            if var not in env and (real_home / sub).is_dir():
++                env[var] = str(real_home / sub)
+     cache = _SHARED_CACHE
+     # TMPDIR must differ from the working directory: Go ignores a go.mod that
+     # sits in the temp root.
+diff --git a/backend/schema.graphql b/backend/schema.graphql
+deleted file mode 100644
+index 7415d7c..0000000
+--- a/backend/schema.graphql
++++ /dev/null
+@@ -1,12 +0,0 @@
+-type Query {
+-  greeting: String!
+-}
+-
+-type Mutation {
+-  setGreeting(message: String!): String!
+-}
+-
+-schema {
+-  query: Query
+-  mutation: Mutation
+-}
+\ No newline at end of file
+diff --git a/backend/static_checks.py b/backend/static_checks.py
+index 8a644a2..ea69178 100644
+--- a/backend/static_checks.py
++++ b/backend/static_checks.py
+@@ -70,6 +70,18 @@ def _env_adjust(diag: Diagnostic) -> Diagnostic:
+     return diag
+ 
+ 
++def _fallback(res: "sandbox.ProcResult", diags: list[Diagnostic], tool: str) -> list[Diagnostic]:
++    """A checker that exits non-zero must never look clean, even if its output
++    format was not recognised (tool versions word their messages differently)."""
++    if res.returncode in (0, 127) or res.timed_out or diags:
++        return diags
++    lines = [ln.strip() for ln in res.output.splitlines() if ln.strip()]
++    first = next((ln for ln in lines if re.search(r"error", ln, re.I)), lines[0] if lines else "")
++    m = re.search(r":(\d+):", first) or re.search(r"line (\d+)", first)
++    message = first or f"{tool} exited with status {res.returncode}"
++    return [Diagnostic(int(m.group(1)) if m else None, None, "error", message[:500], tool)]
++
++
+ def _parse_gnu(output: str, filename: str, tool: str, default_sev: str = "error") -> list[Diagnostic]:
+     diags = []
+     for line in output.splitlines():
+@@ -200,7 +212,7 @@ def _gcc_like(compiler: str, std: str):
+                            "-fdiagnostics-color=never", filename], workdir, timeout=TOOL_TIMEOUT)
+         if res.timed_out:
+             return [], [ToolRun(compiler, "timeout")]
+-        return _parse_gnu(res.stderr, filename, compiler), [ToolRun(compiler, "ran")]
++        return _fallback(res, _parse_gnu(res.stderr, filename, compiler), compiler), [ToolRun(compiler, "ran")]
+     return check
+ 
+ 
+@@ -222,20 +234,50 @@ def _check_java(workdir: Path, filename: str, source: str):
+                 col = follow.index("^") + 1
+                 break
+         diags.append(_env_adjust(Diagnostic(int(m.group(1)), col, _severity(m.group(2)), m.group(3), "javac")))
+-    return diags, [ToolRun("javac", "ran")]
++    return _fallback(res, diags, "javac"), [ToolRun("javac", "ran")]
+ 
+ 
+ def _check_ruby(workdir: Path, filename: str, source: str):
+     if sandbox.which("ruby") is None:
+         return [], [ToolRun("ruby -wc", "unavailable", "Ruby is not installed")]
+     res = sandbox.run(["ruby", "-wc", filename], workdir, timeout=TOOL_TIMEOUT)
+-    diags = []
+-    for line in res.stderr.splitlines():
+-        m = re.match(rf"^(?:ruby: )?{re.escape(filename)}:(\d+):\s*(warning: )?(.+)$", line.strip())
++    if res.timed_out:
++        return [], [ToolRun("ruby -wc", "timeout")]
++    return _fallback(res, parse_ruby_check(res.output, filename), "ruby -wc"), [ToolRun("ruby -wc", "ran")]
++
++
++def parse_ruby_check(output: str, filename: str) -> list[Diagnostic]:
++    """Parse `ruby -wc` output from both parse.y (Ruby <= 3.3) and Prism (3.4+).
++
++    parse.y:  [ruby: ]x.rb:2: syntax error, unexpected integer literal ... (SyntaxError)
++              x.rb:5: warning: assigned but unused variable - y
++    Prism:    ruby: x.rb:3: syntax errors found (SyntaxError)
++                > 2 |   1
++                    |   ^ unexpected integer; expected a `)` to close the parameters
++    """
++    header = re.compile(rf"(?:^|[\s:]){re.escape(filename)}:(\d+):\s*(warning: )?(.+)$")
++    prism_line = re.compile(r"^>\s*(\d+)\s*\|")
++    prism_msg = re.compile(r"^\|\s*\^+~*\s*(.+)$")
++    diags: list[Diagnostic] = []
++    prism: list[Diagnostic] = []
++    current = None
++    for raw in output.splitlines():
++        line = raw.strip()
++        m = header.search(line)
+         if m:
+             diags.append(Diagnostic(int(m.group(1)), None, "warning" if m.group(2) else "error",
+                                     m.group(3).strip(), "ruby -wc"))
+-    return diags, [ToolRun("ruby -wc", "ran")]
++            continue
++        m = prism_line.match(line)
++        if m:
++            current = int(m.group(1))
++            continue
++        m = prism_msg.match(line)
++        if m and current is not None:
++            prism.append(Diagnostic(current, None, "error", m.group(1).strip(), "ruby -wc"))
++    if prism:  # Prism's per-error lines are more precise than its "syntax errors found" header
++        diags = [d for d in diags if "syntax errors found" not in d.message] + prism
++    return diags
+ 
+ 
+ def _check_php(workdir: Path, filename: str, source: str):
+@@ -248,7 +290,7 @@ def _check_php(workdir: Path, filename: str, source: str):
+         if m:
+             sev = "warning" if m.group(1) in {"Warning", "Deprecated"} else "error"
+             diags.append(Diagnostic(int(m.group(3)), None, sev, f"{m.group(1)}: {m.group(2)}", "php -l"))
+-    return diags, [ToolRun("php -l", "ran")]
++    return _fallback(res, diags, "php -l"), [ToolRun("php -l", "ran")]
+ 
+ 
+ def _check_rust(workdir: Path, filename: str, source: str):
+@@ -281,9 +323,10 @@ def _check_shell(workdir: Path, filename: str, source: str):
+         res = sandbox.run(["bash", "-n", filename], workdir, timeout=TOOL_TIMEOUT)
+         runs.append(ToolRun("bash -n", "ran"))
+         for line in res.stderr.splitlines():
+-            m = re.match(rf"^{re.escape(filename)}: line (\d+): (.+)$", line.strip())
++            m = re.search(rf"{re.escape(filename)}: line (\d+): (.+)$", line.strip())
+             if m:
+                 diags.append(Diagnostic(int(m.group(1)), None, "error", m.group(2), "bash -n"))
++        diags = _fallback(res, diags, "bash -n")
+     if sandbox.which("shellcheck"):
+         res = sandbox.run(["shellcheck", "-f", "json", filename], workdir, timeout=TOOL_TIMEOUT)
+         runs.append(ToolRun("shellcheck", "ran"))
+diff --git a/backend/test_analyze_repo.py b/backend/test_analyze_repo.py
+deleted file mode 100644
+index c777fd8..0000000
+--- a/backend/test_analyze_repo.py
++++ /dev/null
+@@ -1,511 +0,0 @@
+-"""
+-Tests for:
+-  - github_fetcher.parse_github_url
+-  - github_fetcher.fetch_python_files  (network calls mocked via unittest.mock)
+-  - POST /analyze-repo  (FastAPI TestClient + mocked fetch_python_files)
+-
+-Run with:
+-    cd backend
+-    pytest test_analyze_repo.py -v
+-"""
+-
+-import base64
+-import sys
+-import os
+-import pytest
+-from unittest.mock import patch, MagicMock
+-
+-# Allow running from the repo root
+-sys.path.insert(0, os.path.dirname(__file__))
+-
+-from github_fetcher import parse_github_url, fetch_python_files, GitHubFile
+-
+-
+-# ---------------------------------------------------------------------------
+-# parse_github_url
+-# ---------------------------------------------------------------------------
+-
+-class TestParseGitHubUrl:
+-    def test_plain_url(self):
+-        owner, repo = parse_github_url("https://github.com/psf/requests")
+-        assert owner == "psf"
+-        assert repo == "requests"
+-
+-    def test_git_suffix(self):
+-        owner, repo = parse_github_url("https://github.com/psf/requests.git")
+-        assert owner == "psf"
+-        assert repo == "requests"
+-
+-    def test_trailing_whitespace(self):
+-        owner, repo = parse_github_url("  https://github.com/octocat/Hello-World  ")
+-        assert owner == "octocat"
+-        assert repo == "Hello-World"
+-
+-    def test_invalid_url_raises(self):
+-        with pytest.raises(ValueError, match="Not a recognised"):
+-            parse_github_url("https://gitlab.com/owner/repo")
+-
+-    def test_missing_repo_raises(self):
+-        with pytest.raises(ValueError):
+-            parse_github_url("https://github.com/owner")
+-
+-    def test_plain_http(self):
+-        owner, repo = parse_github_url("http://github.com/owner/repo")
+-        assert owner == "owner"
+-        assert repo == "repo"
+-
+-
+-# ---------------------------------------------------------------------------
+-# fetch_python_files  (mocked network)
+-# ---------------------------------------------------------------------------
+-
+-def _make_response(json_data, status=200):
+-    """Create a minimal mock requests.Response."""
+-    mock = MagicMock()
+-    mock.status_code = status
+-    mock.json.return_value = json_data
+-    mock.raise_for_status = MagicMock()
+-    return mock
+-
+-
+-def _b64(text: str) -> str:
+-    return base64.b64encode(text.encode()).decode()
+-
+-
+-SIMPLE_PY = "def hello():\n    return 'hello'\n"
+-
+-
+-class TestFetchPythonFiles:
+-    def test_returns_py_files_only(self):
+-        """Files with non-.py extensions should be filtered out."""
+-        repo_resp = _make_response({"default_branch": "main"})
+-        tree_resp = _make_response({
+-            "tree": [
+-                {"type": "blob", "path": "foo.py", "url": "u1"},
+-                {"type": "blob", "path": "README.md", "url": "u2"},
+-                {"type": "blob", "path": "bar.py", "url": "u3"},
+-                {"type": "tree", "path": "src", "url": "u4"},
+-            ]
+-        })
+-        content_resp = _make_response({
+-            "content": _b64(SIMPLE_PY),
+-            "encoding": "base64",
+-        })
+-
+-        with patch("github_fetcher.requests.get") as mock_get:
+-            mock_get.side_effect = [repo_resp, tree_resp, content_resp, content_resp]
+-            files = fetch_python_files("https://github.com/owner/repo")
+-
+-        assert len(files) == 2
+-        assert all(f.path.endswith(".py") for f in files)
+-        assert all(f.source == SIMPLE_PY for f in files)
+-
+-    def test_max_files_cap(self):
+-        """fetch_python_files should honour the max_files limit."""
+-        repo_resp = _make_response({"default_branch": "main"})
+-        tree_entries = [
+-            {"type": "blob", "path": f"f{i}.py", "url": f"u{i}"}
+-            for i in range(10)
+-        ]
+-        tree_resp = _make_response({"tree": tree_entries})
+-        content_resp = _make_response({
+-            "content": _b64(SIMPLE_PY),
+-            "encoding": "base64",
+-        })
+-
+-        with patch("github_fetcher.requests.get") as mock_get:
+-            # repo + tree + 3 content calls
+-            mock_get.side_effect = [repo_resp, tree_resp] + [content_resp] * 3
+-            files = fetch_python_files("https://github.com/owner/repo", max_files=3)
+-
+-        assert len(files) == 3
+-
+-    def test_binary_file_skipped(self):
+-        """Files that cannot be decoded as UTF-8 should be silently skipped."""
+-        repo_resp = _make_response({"default_branch": "main"})
+-        tree_resp = _make_response({
+-            "tree": [{"type": "blob", "path": "data.py", "url": "u1"}]
+-        })
+-        binary_resp = _make_response({
+-            "content": base64.b64encode(b"\xff\xfe").decode(),
+-            "encoding": "base64",
+-        })
+-
+-        with patch("github_fetcher.requests.get") as mock_get:
+-            mock_get.side_effect = [repo_resp, tree_resp, binary_resp]
+-            files = fetch_python_files("https://github.com/owner/repo")
+-
+-        assert files == []
+-
+-    def test_invalid_url_raises(self):
+-        with pytest.raises(ValueError):
+-            fetch_python_files("https://not-github.com/owner/repo")
+-
+-    def test_return_total_flag(self):
+-        """_return_total=True should return (files, total_found) tuple."""
+-        repo_resp = _make_response({"default_branch": "main"})
+-        tree_entries = [
+-            {"type": "blob", "path": f"f{i}.py", "url": f"u{i}"}
+-            for i in range(5)
+-        ]
+-        tree_resp = _make_response({"tree": tree_entries})
+-        content_resp = _make_response({
+-            "content": _b64(SIMPLE_PY),
+-            "encoding": "base64",
+-        })
+-
+-        with patch("github_fetcher.requests.get") as mock_get:
+-            mock_get.side_effect = [repo_resp, tree_resp] + [content_resp] * 3
+-            result = fetch_python_files(
+-                "https://github.com/owner/repo", max_files=3, _return_total=True
+-            )
+-
+-        assert isinstance(result, tuple)
+-        files, total = result
+-        assert len(files) == 3
+-        assert total == 5
+-
+-    def test_return_total_without_flag_is_list(self):
+-        """Default (_return_total=False) must still return a plain list."""
+-        repo_resp = _make_response({"default_branch": "main"})
+-        tree_resp = _make_response({"tree": [
+-            {"type": "blob", "path": "a.py", "url": "u1"},
+-        ]})
+-        content_resp = _make_response({
+-            "content": _b64(SIMPLE_PY),
+-            "encoding": "base64",
+-        })
+-        with patch("github_fetcher.requests.get") as mock_get:
+-            mock_get.side_effect = [repo_resp, tree_resp, content_resp]
+-            result = fetch_python_files("https://github.com/owner/repo")
+-        assert isinstance(result, list)
+-
+-
+-# ---------------------------------------------------------------------------
+-# POST /analyze-repo  (FastAPI endpoint via TestClient)
+-# ---------------------------------------------------------------------------
+-
+-# Import here so sys.path is already set up
+-from fastapi.testclient import TestClient
+-from main import app  # noqa: E402
+-
+-client = TestClient(app)
+-
+-
+-# ---------------------------------------------------------------------------
+-# Helpers shared across endpoint tests
+-# ---------------------------------------------------------------------------
+-
+-def _fake_fetch(files, total=None):
+-    """
+-    Return a mock for main.fetch_python_files that gives back (files, total).
+-    If total is omitted it defaults to len(files).
+-    """
+-    if total is None:
+-        total = len(files)
+-    return (files, total)
+-
+-
+-# ---------------------------------------------------------------------------
+-# Validation / error path tests  (shape unchanged from old tests)
+-# ---------------------------------------------------------------------------
+-
+-class TestAnalyzeRepoEndpointValidation:
+-    def test_invalid_url_returns_400(self):
+-        resp = client.post(
+-            "/analyze-repo",
+-            json={"github_url": "https://gitlab.com/owner/repo"},
+-        )
+-        assert resp.status_code == 400
+-        assert "Not a recognised" in resp.json()["detail"]
+-
+-    def test_max_files_too_large_returns_400(self):
+-        resp = client.post(
+-            "/analyze-repo",
+-            json={"github_url": "https://github.com/owner/repo", "max_files": 201},
+-        )
+-        assert resp.status_code == 400
+-
+-    def test_max_files_zero_returns_400(self):
+-        resp = client.post(
+-            "/analyze-repo",
+-            json={"github_url": "https://github.com/owner/repo", "max_files": 0},
+-        )
+-        assert resp.status_code == 400
+-
+-    def test_github_api_error_returns_502(self):
+-        with patch("main.fetch_python_files", side_effect=RuntimeError("network down")):
+-            resp = client.post(
+-                "/analyze-repo",
+-                json={"github_url": "https://github.com/owner/repo"},
+-            )
+-        assert resp.status_code == 502
+-        assert "Failed to fetch" in resp.json()["detail"]
+-
+-    def test_default_max_files_is_50(self):
+-        """Verify that omitting max_files from the body defaults to 50."""
+-        with patch("main.fetch_python_files", return_value=([], 0)) as mock_fetch:
+-            client.post(
+-                "/analyze-repo",
+-                json={"github_url": "https://github.com/owner/repo"},
+-            )
+-            mock_fetch.assert_called_once_with(
+-                "https://github.com/owner/repo", max_files=50, _return_total=True
+-            )
+-
+-
+-# ---------------------------------------------------------------------------
+-# New response shape tests
+-# ---------------------------------------------------------------------------
+-
+-class TestAnalyzeRepoResponseShape:
+-    def test_response_is_object_not_list(self):
+-        """Root response must be a dict, not a bare list."""
+-        with patch("main.fetch_python_files", return_value=([], 0)):
+-            resp = client.post(
+-                "/analyze-repo",
+-                json={"github_url": "https://github.com/owner/repo"},
+-            )
+-        assert resp.status_code == 200
+-        data = resp.json()
+-        assert isinstance(data, dict), "Response must be a JSON object, not a list"
+-
+-    def test_response_metadata_fields_present(self):
+-        with patch("main.fetch_python_files", return_value=([], 0)):
+-            resp = client.post(
+-                "/analyze-repo",
+-                json={"github_url": "https://github.com/owner/repo"},
+-            )
+-        data = resp.json()
+-        for field in (
+-            "max_files", "python_files_found", "files_selected",
+-            "files_skipped_due_to_limit", "files_analyzed", "results",
+-        ):
+-            assert field in data, f"Missing top-level field: {field!r}"
+-
+-    def test_empty_repo_returns_empty_results(self):
+-        """An empty repo must return an object with results=[]."""
+-        with patch("main.fetch_python_files", return_value=([], 0)):
+-            resp = client.post(
+-                "/analyze-repo",
+-                json={"github_url": "https://github.com/owner/repo"},
+-            )
+-        data = resp.json()
+-        assert data["results"] == []
+-        assert data["python_files_found"] == 0
+-        assert data["files_selected"] == 0
+-        assert data["files_analyzed"] == 0
+-
+-    def test_max_files_echoed_in_response(self):
+-        with patch("main.fetch_python_files", return_value=([], 0)):
+-            resp = client.post(
+-                "/analyze-repo",
+-                json={"github_url": "https://github.com/owner/repo", "max_files": 7},
+-            )
+-        assert resp.json()["max_files"] == 7
+-
+-    def test_files_skipped_due_to_limit_computed_correctly(self):
+-        """When repo has more .py files than max_files, skipped count is correct."""
+-        fake_files = [GitHubFile(path=f"f{i}.py", source=SIMPLE_PY) for i in range(3)]
+-        # total_found=10, but only 3 were selected (max_files=3)
+-        with patch("main.fetch_python_files", return_value=(fake_files, 10)):
+-            resp = client.post(
+-                "/analyze-repo",
+-                json={"github_url": "https://github.com/owner/repo", "max_files": 3},
+-            )
+-        data = resp.json()
+-        assert data["python_files_found"] == 10
+-        assert data["files_selected"] == 3
+-        assert data["files_skipped_due_to_limit"] == 7
+-        assert data["files_analyzed"] == 3
+-
+-    def test_no_files_skipped_when_under_limit(self):
+-        fake_files = [GitHubFile(path="a.py", source=SIMPLE_PY)]
+-        with patch("main.fetch_python_files", return_value=(fake_files, 1)):
+-            resp = client.post(
+-                "/analyze-repo",
+-                json={"github_url": "https://github.com/owner/repo"},
+-            )
+-        data = resp.json()
+-        assert data["files_skipped_due_to_limit"] == 0
+-
+-    def test_results_list_has_file_and_functions_keys(self):
+-        fake_files = [GitHubFile(path="utils.py", source=SIMPLE_PY)]
+-        with patch("main.fetch_python_files", return_value=(fake_files, 1)):
+-            resp = client.post(
+-                "/analyze-repo",
+-                json={"github_url": "https://github.com/owner/repo"},
+-            )
+-        data = resp.json()
+-        assert len(data["results"]) == 1
+-        entry = data["results"][0]
+-        assert entry["file"] == "utils.py"
+-        assert isinstance(entry["functions"], list)
+-
+-    def test_function_name_present_in_results(self):
+-        fake_files = [GitHubFile(path="utils.py", source=SIMPLE_PY)]
+-        with patch("main.fetch_python_files", return_value=(fake_files, 1)):
+-            resp = client.post(
+-                "/analyze-repo",
+-                json={"github_url": "https://github.com/owner/repo"},
+-            )
+-        fn_names = [f["name"] for f in resp.json()["results"][0]["functions"]]
+-        assert "hello" in fn_names
+-
+-    def test_syntax_error_file_returns_empty_functions(self):
+-        """A .py file with invalid syntax should not crash the endpoint."""
+-        fake_files = [GitHubFile(path="broken.py", source="def (: pass")]
+-        with patch("main.fetch_python_files", return_value=(fake_files, 1)):
+-            resp = client.post(
+-                "/analyze-repo",
+-                json={"github_url": "https://github.com/owner/repo"},
+-            )
+-        assert resp.status_code == 200
+-        data = resp.json()
+-        entry = data["results"][0]
+-        assert entry["file"] == "broken.py"
+-        assert entry["functions"] == []
+-
+-
+-# ---------------------------------------------------------------------------
+-# Per-function transparency fields: mock mode
+-# ---------------------------------------------------------------------------
+-
+-class TestMockModeFields:
+-    """
+-    Tests run without GROQ_API_KEY, so generate_tests always falls back to
+-    the placeholder mock — _mock_generate() embeds '_placeholder' in the code.
+-    """
+-
+-    def _get_fn(self, monkeypatch):
+-        """Helper: call /analyze-repo with SIMPLE_PY and return first function dict."""
+-        monkeypatch.delenv("GROQ_API_KEY", raising=False)
+-        fake_files = [GitHubFile(path="utils.py", source=SIMPLE_PY)]
+-        with patch("main.fetch_python_files", return_value=(fake_files, 1)):
+-            resp = client.post(
+-                "/analyze-repo",
+-                json={"github_url": "https://github.com/owner/repo"},
+-            )
+-        assert resp.status_code == 200
+-        return resp.json()["results"][0]["functions"][0]
+-
+-    def test_generation_mode_is_mock(self, monkeypatch):
+-        fn = self._get_fn(monkeypatch)
+-        assert fn["generation_mode"] == "mock"
+-
+-    def test_coverage_status_is_not_measured(self, monkeypatch):
+-        fn = self._get_fn(monkeypatch)
+-        assert fn["coverage_status"] == "not_measured"
+-
+-    def test_coverage_percent_is_null(self, monkeypatch):
+-        fn = self._get_fn(monkeypatch)
+-        assert fn["coverage_percent"] is None
+-
+-    def test_warning_is_present_and_non_empty(self, monkeypatch):
+-        fn = self._get_fn(monkeypatch)
+-        assert fn["warning"]
+-        assert isinstance(fn["warning"], str)
+-        assert len(fn["warning"]) > 0
+-
+-    def test_tests_passed_still_reported(self, monkeypatch):
+-        fn = self._get_fn(monkeypatch)
+-        # Placeholder test has one `pass` — it runs and passes
+-        assert "tests_passed" in fn
+-        assert isinstance(fn["tests_passed"], int)
+-
+-    def test_tests_failed_still_reported(self, monkeypatch):
+-        fn = self._get_fn(monkeypatch)
+-        assert "tests_failed" in fn
+-        assert isinstance(fn["tests_failed"], int)
+-
+-    def test_all_transparency_fields_present(self, monkeypatch):
+-        fn = self._get_fn(monkeypatch)
+-        for field in ("generation_mode", "coverage_status", "coverage_percent", "warning"):
+-            assert field in fn, f"Missing field: {field!r}"
+-
+-
+-# ---------------------------------------------------------------------------
+-# Per-function transparency fields: LLM mode  (LLM call mocked)
+-# ---------------------------------------------------------------------------
+-
+-class TestLLMModeFields:
+-    """
+-    Simulate a successful LLM response by patching generate_tests to return
+-    real test code that actually imports and calls the target function.
+-    """
+-
+-    # Test code that imports 'hello' from target and calls it — produces real coverage.
+-    _LLM_TEST_CODE = (
+-        "import pytest\n"
+-        "from target import hello\n\n"
+-        "def test_hello_returns_string():\n"
+-        "    assert hello() == 'hello'\n"
+-    )
+-
+-    def _get_fn(self, monkeypatch):
+-        monkeypatch.setenv("GROQ_API_KEY", "fake-key")
+-        fake_files = [GitHubFile(path="utils.py", source=SIMPLE_PY)]
+-        with patch("main.fetch_python_files", return_value=(fake_files, 1)):
+-            with patch("main.generate_tests", return_value=self._LLM_TEST_CODE):
+-                resp = client.post(
+-                    "/analyze-repo",
+-                    json={"github_url": "https://github.com/owner/repo"},
+-                )
+-        assert resp.status_code == 200
+-        return resp.json()["results"][0]["functions"][0]
+-
+-    def test_generation_mode_is_llm(self, monkeypatch):
+-        fn = self._get_fn(monkeypatch)
+-        assert fn["generation_mode"] == "llm"
+-
+-    def test_coverage_status_is_measured(self, monkeypatch):
+-        fn = self._get_fn(monkeypatch)
+-        assert fn["coverage_status"] == "measured"
+-
+-    def test_coverage_percent_is_numeric(self, monkeypatch):
+-        fn = self._get_fn(monkeypatch)
+-        assert fn["coverage_percent"] is not None
+-        assert isinstance(fn["coverage_percent"], (int, float))
+-
+-    def test_warning_is_null(self, monkeypatch):
+-        fn = self._get_fn(monkeypatch)
+-        assert fn["warning"] is None
+-
+-    def test_all_transparency_fields_present(self, monkeypatch):
+-        fn = self._get_fn(monkeypatch)
+-        for field in ("generation_mode", "coverage_status", "coverage_percent", "warning"):
+-            assert field in fn, f"Missing field: {field!r}"
+-
+-    def test_coverage_percent_is_positive_with_real_test(self, monkeypatch):
+-        """
+-        When a real test imports and calls hello(), coverage must be > 0.
+-        This is the transparency regression check: if this fails it means
+-        runner.py is not measuring coverage correctly for LLM-generated tests.
+-        """
+-        fn = self._get_fn(monkeypatch)
+-        assert fn["coverage_percent"] > 0, (
+-            f"Expected coverage > 0 for LLM-generated test that calls hello(), "
+-            f"got {fn['coverage_percent']!r}. "
+-            "Probable cause: runner.py writes fn.source (the AST-unparsed body) as "
+-            "target.py, but the test imports 'hello' from target — the function must "
+-            "be at module level in target.py for coverage to be recorded."
+-        )
+-
+-
+-# ---------------------------------------------------------------------------
+-# Regression: existing /analyze endpoint must still work
+-# ---------------------------------------------------------------------------
+-
+-class TestExistingEndpointsUnchanged:
+-    def test_analyze_endpoint_still_works(self):
+-        """/analyze must still accept a .py upload and return a list."""
+-        import io
+-        source = SIMPLE_PY.encode()
+-        resp = client.post(
+-            "/analyze",
+-            files={"file": ("sample.py", io.BytesIO(source), "text/plain")},
+-        )
+-        assert resp.status_code == 200
+-        data = resp.json()
+-        assert isinstance(data, list)
+-        assert data[0]["name"] == "hello"
+diff --git a/backend/test_executors.py b/backend/test_executors.py
+index 5a290b7..bc20f64 100644
+--- a/backend/test_executors.py
++++ b/backend/test_executors.py
+@@ -113,3 +113,18 @@ def test_parse_tap_skips_suites():
+     tests = executors.parse_tap(tap)
+     assert [(t["name"], t["status"]) for t in tests] == [("inner", "passed"), ("broken", "failed")]
+     assert "boom" in tests[1]["message"]
++
++
++def test_sandbox_finds_rustup_toolchains_without_rustup_home(tmp_path, monkeypatch):
++    # GitHub runners keep toolchains in ~/.rustup without exporting RUSTUP_HOME; the sandbox
++    # swaps HOME for the workdir, so it must point rustup at the real location.
++    fake_home = tmp_path / "home"
++    (fake_home / ".rustup").mkdir(parents=True)
++    (fake_home / ".cargo").mkdir()
++    monkeypatch.delenv("RUSTUP_HOME", raising=False)
++    monkeypatch.delenv("CARGO_HOME", raising=False)
++    monkeypatch.setattr(sandbox.Path, "home", classmethod(lambda cls: fake_home))
++    env = sandbox.scrubbed_env(tmp_path / "work")
++    assert env["RUSTUP_HOME"] == str(fake_home / ".rustup")
++    assert env["CARGO_HOME"] == str(fake_home / ".cargo")
++    assert env["HOME"] == str(tmp_path / "work")
+diff --git a/backend/test_static_checks.py b/backend/test_static_checks.py
+index 2572d44..a9feb7b 100644
+--- a/backend/test_static_checks.py
++++ b/backend/test_static_checks.py
+@@ -85,3 +85,48 @@ def test_json_and_yaml_syntax_errors():
+     assert json_syntax_error('{"a": 1,}')["line"] == 1
+     assert yaml_syntax_error("a: [1, 2\nb: 3\n")["line"] is not None
+     assert json_syntax_error('{"a": 1}') is None
++
++
++# Output shapes differ across Ruby versions; CI runners and servers do not all run the same one.
++RUBY_PARSE_Y_32 = """x.rb: --> x.rb
++Unmatched `(', missing `)' ?
++> 1  def f(
++  3  end
++x.rb:2: syntax error, unexpected integer literal, expecting ')' (SyntaxError)
++"""
++RUBY_PARSE_Y_33 = "ruby: x.rb:2: syntax error, unexpected integer literal, expecting ')' (SyntaxError)\n"
++RUBY_PRISM_34 = """ruby: x.rb:3: syntax errors found (SyntaxError)
++  1 | def f(
++> 2 |   1
++    |   ^ unexpected integer; expected a `)` to close the parameters
++  3 | end
++"""
++
++
++@pytest.mark.parametrize("output,line,text", [
++    (RUBY_PARSE_Y_32, 2, "unexpected integer literal"),
++    (RUBY_PARSE_Y_33, 2, "unexpected integer literal"),
++    (RUBY_PRISM_34, 2, "expected a `)`"),
++])
++def test_parse_ruby_check_across_versions(output, line, text):
++    from static_checks import parse_ruby_check
++    diags = parse_ruby_check(output, "x.rb")
++    errors = [d for d in diags if d.severity == "error"]
++    assert errors and errors[0].line == line and text in errors[0].message
++
++
++def test_parse_ruby_check_warning():
++    from static_checks import parse_ruby_check
++    diags = parse_ruby_check("x.rb:5: warning: assigned but unused variable - y\nSyntax OK\n", "x.rb")
++    assert diags[0].severity == "warning" and diags[0].line == 5
++
++
++def test_unrecognised_failure_output_still_reports_error():
++    import sandbox
++    from static_checks import _fallback
++    res = sandbox.ProcResult(returncode=1, stdout="", stderr="weird format: Error at x.rb:7: boom\n",
++                             timed_out=False, duration_ms=1)
++    diags = _fallback(res, [], "tool")
++    assert diags[0].severity == "error" and diags[0].line == 7
++    ok = sandbox.ProcResult(returncode=0, stdout="", stderr="", timed_out=False, duration_ms=1)
++    assert _fallback(ok, [], "tool") == []
+diff --git a/frontend/app.js b/frontend/app.js
+deleted file mode 100644
+index 77fb019..0000000
+--- a/frontend/app.js
++++ /dev/null
+@@ -1,533 +0,0 @@
+-/* ── app.js — AI Test Generator Frontend ─────────────────────────────── */
+-'use strict';
+-
+-// ── Tab switching ─────────────────────────────────────────────────────────
+-document.querySelectorAll('.tab-btn').forEach(btn => {
+-  btn.addEventListener('click', () => {
+-    const target = btn.dataset.tab;
+-    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+-    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+-    btn.classList.add('active');
+-    document.getElementById(target).classList.add('active');
+-    clearResults();
+-    clearBanner();
+-  });
+-});
+-
+-// ── Shared state ──────────────────────────────────────────────────────────
+-let lastResponse = null;   // raw JSON from last successful call
+-
+-// ── DOM helpers ───────────────────────────────────────────────────────────
+-const $ = id => document.getElementById(id);
+-
+-function setLoading(btn, on) {
+-  if (on) { btn.classList.add('loading'); btn.disabled = true; }
+-  else     { btn.classList.remove('loading'); btn.disabled = false; }
+-}
+-
+-function showBanner(type, msg) {
+-  const el = $('global-banner');
+-  el.className = `banner ${type} visible`;
+-  el.textContent = msg;
+-  el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+-}
+-
+-function clearBanner() {
+-  const el = $('global-banner');
+-  el.className = 'banner';
+-  el.textContent = '';
+-}
+-
+-function clearResults() {
+-  $('results-section').innerHTML = '';
+-  lastResponse = null;
+-}
+-
+-function setInlineError(fieldId, errId, msg) {
+-  const field = $(fieldId);
+-  const err   = $(errId);
+-  if (msg) {
+-    field.classList.add('error');
+-    err.textContent = msg;
+-    err.classList.add('visible');
+-  } else {
+-    field.classList.remove('error');
+-    err.classList.remove('visible');
+-  }
+-}
+-
+-// ── Fetch wrapper with error normalisation ────────────────────────────────
+-async function apiFetch(path, init) {
+-  let resp;
+-  try {
+-    resp = await fetch(path, init);
+-  } catch (e) {
+-    throw new Error(
+-      `Network error — could not reach the backend at ${window.location.origin}. ` +
+-      `Is uvicorn running? (${e.message})`
+-    );
+-  }
+-  if (!resp.ok) {
+-    let detail;
+-    try {
+-      const body = await resp.json();
+-      detail = body.detail || JSON.stringify(body);
+-    } catch (_) {
+-      detail = await resp.text();
+-    }
+-    const prefix = resp.status === 502
+-      ? '502 — Upstream failure (GitHub or LLM API): '
+-      : `${resp.status} — `;
+-    throw new Error(prefix + detail);
+-  }
+-  return resp.json();
+-}
+-
+-// ── Download JSON ─────────────────────────────────────────────────────────
+-function attachDownload(data, filename) {
+-  const btn = document.createElement('button');
+-  btn.className = 'btn btn-secondary';
+-  btn.innerHTML = '⬇ Download full JSON report';
+-  btn.addEventListener('click', () => {
+-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+-    const url  = URL.createObjectURL(blob);
+-    const a    = document.createElement('a');
+-    a.href = url; a.download = filename; a.click();
+-    URL.revokeObjectURL(url);
+-  });
+-  return btn;
+-}
+-
+-// ── Coverage bar ──────────────────────────────────────────────────────────
+-function coverageBar(pct) {
+-  if (pct === null || pct === undefined) {
+-    return `<div class="cov-not-measured">Coverage: Not measured</div>`;
+-  }
+-  const cls = pct >= 80 ? '' : pct >= 50 ? 'mid' : 'low';
+-  return `
+-    <div class="cov-row">
+-      <div class="cov-label">
+-        <span>Coverage</span>
+-        <span class="cov-pct">${pct.toFixed(1)}%</span>
+-      </div>
+-      <div class="cov-bar-track">
+-        <div class="cov-bar-fill ${cls}" style="width:${Math.min(pct,100)}%"></div>
+-      </div>
+-    </div>`;
+-}
+-
+-// ── Function result block ─────────────────────────────────────────────────
+-function renderFunction(fn) {
+-  const isMock = fn.generation_mode === 'mock';
+-  const badge  = isMock
+-    ? `<span class="badge badge-mock">mock</span>`
+-    : (fn.generation_mode === 'llm' ? `<span class="badge badge-llm">llm</span>` : '');
+-
+-  const passColor = fn.tests_passed > 0 ? 'si-pass' : 'si-val';
+-  const failColor = fn.tests_failed > 0 ? 'si-fail' : 'si-val';
+-
+-  const flagsHtml = (fn.flags && fn.flags.length)
+-    ? `<ul class="flags-list">${fn.flags.map(f => `<li>${esc(f)}</li>`).join('')}</ul>`
+-    : '';
+-
+-  const mockWarn = isMock && fn.warning
+-    ? `<div class="mock-warning">⚠ ${esc(fn.warning)}</div>`
+-    : '';
+-
+-  // signature minus the function name prefix if the name is already shown
+-  const sigDisplay = fn.signature && fn.signature !== fn.name ? fn.signature : '';
+-
+-  const block = document.createElement('div');
+-  block.className = 'fn-block';
+-  block.innerHTML = `
+-    <div class="fn-header">
+-      <span class="fn-name">${esc(fn.name)}</span>
+-      <span class="fn-sig">${esc(sigDisplay)}</span>
+-      <div class="fn-badges">${badge}</div>
+-      <span class="fn-chevron">▶</span>
+-    </div>
+-    <div class="fn-body">
+-      ${mockWarn}
+-      <div class="stats-row">
+-        <div class="stat-item">
+-          <span class="si-label">Generated:</span>
+-          <span class="si-val">${fn.tests_generated}</span>
+-        </div>
+-        <div class="stat-item">
+-          <span class="si-label">Passed:</span>
+-          <span class="${passColor}">${fn.tests_passed}</span>
+-        </div>
+-        <div class="stat-item">
+-          <span class="si-label">Failed:</span>
+-          <span class="${failColor}">${fn.tests_failed}</span>
+-        </div>
+-      </div>
+-      ${coverageBar(isMock ? null : fn.coverage_percent)}
+-      ${flagsHtml}
+-    </div>`;
+-
+-  block.querySelector('.fn-header').addEventListener('click', () => block.classList.toggle('open'));
+-  return block;
+-}
+-
+-// ── /analyze — per-function results (no repo wrapper) ────────────────────
+-function renderAnalyzeResults(data) {
+-  const section = $('results-section');
+-  section.innerHTML = '';
+-
+-  const toolbar = document.createElement('div');
+-  toolbar.className = 'results-toolbar';
+-  toolbar.appendChild(attachDownload(data, 'analyze-result.json'));
+-  section.appendChild(toolbar);
+-
+-  if (!data.length) {
+-    section.insertAdjacentHTML('beforeend',
+-      `<div class="empty-state"><div class="es-icon">🔍</div>
+-       <div class="es-text">No top-level functions found in this file.</div></div>`);
+-    return;
+-  }
+-
+-  // /analyze returns a flat list of function results — no file grouping
+-  data.forEach(fn => section.appendChild(renderFunction(fn)));
+-}
+-
+-// ── /analyze-repo — metadata + file cards ────────────────────────────────
+-function renderRepoResults(data) {
+-  const section = $('results-section');
+-  section.innerHTML = '';
+-
+-  // Toolbar
+-  const toolbar = document.createElement('div');
+-  toolbar.className = 'results-toolbar';
+-  toolbar.appendChild(attachDownload(data, 'analyze-repo-result.json'));
+-  section.appendChild(toolbar);
+-
+-  // Metadata chips
+-  const skipped = data.files_skipped_due_to_limit || 0;
+-  const warnClass = skipped > 0 ? 'warn-chip' : '';
+-  section.insertAdjacentHTML('beforeend', `
+-    <div class="repo-meta">
+-      <div class="meta-chip">
+-        <span class="mc-label">py files found</span>
+-        <span class="mc-value">${data.python_files_found}</span>
+-      </div>
+-      <div class="meta-chip">
+-        <span class="mc-label">files selected</span>
+-        <span class="mc-value">${data.files_selected}</span>
+-      </div>
+-      <div class="meta-chip ${warnClass}">
+-        <span class="mc-label">skipped (limit)</span>
+-        <span class="mc-value">${skipped}</span>
+-      </div>
+-      <div class="meta-chip">
+-        <span class="mc-label">files analyzed</span>
+-        <span class="mc-value">${data.files_analyzed}</span>
+-      </div>
+-      <div class="meta-chip">
+-        <span class="mc-label">max_files cap</span>
+-        <span class="mc-value">${data.max_files}</span>
+-      </div>
+-    </div>`);
+-
+-  if (!data.results || !data.results.length) {
+-    section.insertAdjacentHTML('beforeend',
+-      `<div class="empty-state"><div class="es-icon">📭</div>
+-       <div class="es-text">No Python files were found in this repository.</div></div>`);
+-    return;
+-  }
+-
+-  data.results.forEach(fileEntry => {
+-    const totalPass = (fileEntry.functions || []).reduce((s, f) => s + (f.tests_passed || 0), 0);
+-    const totalFail = (fileEntry.functions || []).reduce((s, f) => s + (f.tests_failed || 0), 0);
+-
+-    const card = document.createElement('div');
+-    card.className = 'file-card';
+-
+-    const statsHtml = fileEntry.parse_error
+-      ? `<span class="stat-pill pill-red">parse error</span>`
+-      : `<span class="stat-pill pill-green">${totalPass} passed</span>
+-         ${totalFail ? `<span class="stat-pill pill-red">${totalFail} failed</span>` : ''}`;
+-
+-    card.innerHTML = `
+-      <div class="file-card-header">
+-        <span class="file-path">${esc(fileEntry.file)}</span>
+-        <div class="file-stats">${statsHtml}</div>
+-        <span class="chevron">▶</span>
+-      </div>
+-      <div class="file-card-body"></div>`;
+-
+-    card.querySelector('.file-card-header').addEventListener('click', () => card.classList.toggle('open'));
+-
+-    const body = card.querySelector('.file-card-body');
+-    if (fileEntry.parse_error) {
+-      body.innerHTML = `<div class="parse-error">Parse error: ${esc(fileEntry.parse_error)}</div>`;
+-    } else if (!fileEntry.functions || !fileEntry.functions.length) {
+-      body.innerHTML = `<p style="font-size:12px;color:var(--text-muted)">No top-level functions found.</p>`;
+-    } else {
+-      fileEntry.functions.forEach(fn => body.appendChild(renderFunction(fn)));
+-    }
+-
+-    section.appendChild(card);
+-  });
+-}
+-
+-// ── /analyze-spec — operation cards ──────────────────────────────────────
+-function renderSpecResults(data) {
+-  const section = $('results-section');
+-  section.innerHTML = '';
+-
+-  const toolbar = document.createElement('div');
+-  toolbar.className = 'results-toolbar';
+-  toolbar.appendChild(attachDownload(data, 'analyze-spec-result.json'));
+-  section.appendChild(toolbar);
+-
+-  // Spec summary chips
+-  const skipped = data.operations_skipped || 0;
+-  section.insertAdjacentHTML('beforeend', `
+-    <div class="spec-meta">
+-      <div class="meta-chip">
+-        <span class="mc-label">spec type</span>
+-        <span class="mc-value" style="font-size:13px">${esc(data.spec_type || '—')}</span>
+-      </div>
+-      <div class="meta-chip">
+-        <span class="mc-label">operations processed</span>
+-        <span class="mc-value">${data.operations_processed}</span>
+-      </div>
+-      ${skipped ? `<div class="meta-chip warn-chip">
+-        <span class="mc-label">skipped (cap)</span>
+-        <span class="mc-value">${skipped}</span>
+-      </div>` : ''}
+-      ${(data.failed_operations && data.failed_operations.length) ? `<div class="meta-chip warn-chip">
+-        <span class="mc-label">failed ops</span>
+-        <span class="mc-value">${data.failed_operations.length}</span>
+-      </div>` : ''}
+-    </div>`);
+-
+-  if (data.warning) {
+-    section.insertAdjacentHTML('beforeend',
+-      `<div class="banner warn visible">${esc(data.warning)}</div>`);
+-  }
+-
+-  if (!data.results || !data.results.length) {
+-    section.insertAdjacentHTML('beforeend',
+-      `<div class="empty-state"><div class="es-icon">📋</div>
+-       <div class="es-text">No operations were processed.</div></div>`);
+-    return;
+-  }
+-
+-  data.results.forEach(op => {
+-    const card = document.createElement('div');
+-    card.className = 'op-card';
+-
+-    // Method badge
+-    let methodBadge;
+-    if (op.gql_operation) {
+-      const gqlLabel = op.gql_operation.toUpperCase();
+-      methodBadge = `<span class="op-method method-gql">${gqlLabel}</span>`;
+-    } else {
+-      const m = (op.method || 'OTHER').toUpperCase();
+-      const cls = { GET:'get', POST:'post', PUT:'put', DELETE:'delete', PATCH:'patch' }[m] || 'other';
+-      methodBadge = `<span class="op-method method-${cls}">${m}</span>`;
+-    }
+-
+-    const opLabel = op.path || op.name;
+-    const passPill = op.tests_passed > 0
+-      ? `<span class="stat-pill pill-green">${op.tests_passed} passed</span>` : '';
+-    const failPill = op.tests_failed > 0
+-      ? `<span class="stat-pill pill-red">${op.tests_failed} failed</span>` : '';
+-
+-    card.innerHTML = `
+-      <div class="op-header">
+-        ${methodBadge}
+-        <span class="op-path">${esc(opLabel)}</span>
+-        <div class="file-stats">${passPill}${failPill}</div>
+-        <span class="op-chevron">▶</span>
+-      </div>
+-      <div class="op-body">
+-        <div class="stats-row">
+-          <div class="stat-item"><span class="si-label">Generated:</span> <span class="si-val">${op.tests_generated}</span></div>
+-          <div class="stat-item"><span class="si-label">Passed:</span> <span class="${op.tests_passed > 0 ? 'si-pass' : 'si-val'}">${op.tests_passed}</span></div>
+-          <div class="stat-item"><span class="si-label">Failed:</span> <span class="${op.tests_failed > 0 ? 'si-fail' : 'si-val'}">${op.tests_failed}</span></div>
+-        </div>
+-        ${coverageBar(op.coverage_percent)}
+-        ${op.summary ? `<p style="font-size:12px;color:var(--text-muted);margin-top:6px">${esc(op.summary)}</p>` : ''}
+-      </div>`;
+-
+-    card.querySelector('.op-header').addEventListener('click', () => card.classList.toggle('open'));
+-    section.appendChild(card);
+-  });
+-}
+-
+-// ── HTML escape ───────────────────────────────────────────────────────────
+-function esc(s) {
+-  if (s == null) return '';
+-  return String(s)
+-    .replace(/&/g, '&amp;')
+-    .replace(/</g, '&lt;')
+-    .replace(/>/g, '&gt;')
+-    .replace(/"/g, '&quot;');
+-}
+-
+-// ══════════════════════════════════════════════════════════════════════════
+-// TAB 1 — Upload .py file  →  POST /analyze
+-// ══════════════════════════════════════════════════════════════════════════
+-
+-(function initTab1() {
+-  const zone     = $('dz-py');
+-  const input    = $('dz-py-input');
+-  const nameEl   = $('dz-py-name');
+-  const analyzeBtn = $('btn-analyze');
+-  let selectedFile = null;
+-
+-  function selectFile(f) {
+-    if (!f) return;
+-    if (!f.name.endsWith('.py')) {
+-      showBanner('error', `"${f.name}" is not a .py file. Only Python source files are accepted.`);
+-      return;
+-    }
+-    selectedFile = f;
+-    nameEl.textContent = f.name;
+-    nameEl.style.display = 'inline-block';
+-    clearBanner();
+-    analyzeBtn.disabled = false;
+-  }
+-
+-  zone.addEventListener('click', () => input.click());
+-  input.addEventListener('change', () => selectFile(input.files[0]));
+-
+-  zone.addEventListener('dragover',  e => { e.preventDefault(); zone.classList.add('drag-over'); });
+-  zone.addEventListener('dragleave', ()  => zone.classList.remove('drag-over'));
+-  zone.addEventListener('drop', e => {
+-    e.preventDefault();
+-    zone.classList.remove('drag-over');
+-    selectFile(e.dataTransfer.files[0]);
+-  });
+-
+-  analyzeBtn.addEventListener('click', async () => {
+-    if (!selectedFile) return;
+-    clearBanner();
+-    clearResults();
+-    setLoading(analyzeBtn, true);
+-
+-    const fd = new FormData();
+-    fd.append('file', selectedFile);
+-
+-    try {
+-      const data = await apiFetch('/analyze', { method: 'POST', body: fd });
+-      lastResponse = data;
+-      renderAnalyzeResults(data);
+-    } catch (e) {
+-      showBanner('error', e.message);
+-    } finally {
+-      setLoading(analyzeBtn, false);
+-    }
+-  });
+-})();
+-
+-// ══════════════════════════════════════════════════════════════════════════
+-// TAB 2 — GitHub repo  →  POST /analyze-repo
+-// ══════════════════════════════════════════════════════════════════════════
+-
+-(function initTab2() {
+-  const urlInput    = $('repo-url');
+-  const urlErr      = $('repo-url-err');
+-  const maxInput    = $('repo-max-files');
+-  const repoBtn     = $('btn-analyze-repo');
+-
+-  urlInput.addEventListener('input', () => setInlineError('repo-url', 'repo-url-err', ''));
+-
+-  repoBtn.addEventListener('click', async () => {
+-    const url = urlInput.value.trim();
+-    if (!url) {
+-      setInlineError('repo-url', 'repo-url-err', 'Please enter a GitHub repository URL.');
+-      return;
+-    }
+-    if (!/^https?:\/\/github\.com\//i.test(url)) {
+-      setInlineError('repo-url', 'repo-url-err', 'URL must start with https://github.com/');
+-      return;
+-    }
+-    setInlineError('repo-url', 'repo-url-err', '');
+-    clearBanner();
+-    clearResults();
+-    setLoading(repoBtn, true);
+-
+-    const payload = {
+-      github_url: url,
+-      max_files:  parseInt(maxInput.value, 10) || 20,
+-    };
+-
+-    try {
+-      const data = await apiFetch('/analyze-repo', {
+-        method:  'POST',
+-        headers: { 'Content-Type': 'application/json' },
+-        body:    JSON.stringify(payload),
+-      });
+-      lastResponse = data;
+-      renderRepoResults(data);
+-    } catch (e) {
+-      // Surface inline URL error when backend says 400 with "Not a recognised"
+-      if (e.message.includes('Not a recognised') || e.message.includes('400')) {
+-        setInlineError('repo-url', 'repo-url-err', e.message.replace(/^400\s*—\s*/i, ''));
+-      } else {
+-        showBanner('error', e.message);
+-      }
+-    } finally {
+-      setLoading(repoBtn, false);
+-    }
+-  });
+-})();
+-
+-// ══════════════════════════════════════════════════════════════════════════
+-// TAB 3 — API spec  →  POST /analyze-spec
+-// ══════════════════════════════════════════════════════════════════════════
+-
+-(function initTab3() {
+-  const zone      = $('dz-spec');
+-  const input     = $('dz-spec-input');
+-  const nameEl    = $('dz-spec-name');
+-  const baseInput = $('spec-base-url');
+-  const specBtn   = $('btn-analyze-spec');
+-  let selectedFile = null;
+-
+-  function selectFile(f) {
+-    if (!f) return;
+-    selectedFile = f;
+-    nameEl.textContent = f.name;
+-    nameEl.style.display = 'inline-block';
+-    clearBanner();
+-    specBtn.disabled = false;
+-  }
+-
+-  zone.addEventListener('click', () => input.click());
+-  input.addEventListener('change', () => selectFile(input.files[0]));
+-
+-  zone.addEventListener('dragover',  e => { e.preventDefault(); zone.classList.add('drag-over'); });
+-  zone.addEventListener('dragleave', ()  => zone.classList.remove('drag-over'));
+-  zone.addEventListener('drop', e => {
+-    e.preventDefault();
+-    zone.classList.remove('drag-over');
+-    selectFile(e.dataTransfer.files[0]);
+-  });
+-
+-  specBtn.addEventListener('click', async () => {
+-    if (!selectedFile) return;
+-    clearBanner();
+-    clearResults();
+-    setLoading(specBtn, true);
+-
+-    const fd = new FormData();
+-    fd.append('file', selectedFile);
+-    const baseUrl = baseInput.value.trim();
+-    if (baseUrl) fd.append('base_url', baseUrl);
+-
+-    try {
+-      const data = await apiFetch('/analyze-spec', { method: 'POST', body: fd });
+-      lastResponse = data;
+-      renderSpecResults(data);
+-    } catch (e) {
+-      showBanner('error', e.message);
+-    } finally {
+-      setLoading(specBtn, false);
+-    }
+-  });
+-})();
+diff --git a/frontend/style.css b/frontend/style.css
+deleted file mode 100644
+index 2d87b44..0000000
+--- a/frontend/style.css
++++ /dev/null
+@@ -1,535 +0,0 @@
+-/* ── Reset & base ─────────────────────────────────────────────────────── */
+-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+-
+-:root {
+-  --bg:          #0d1117;
+-  --surface:     #161b22;
+-  --surface2:    #1c2128;
+-  --border:      #30363d;
+-  --border-hi:   #58a6ff;
+-  --text:        #e6edf3;
+-  --text-muted:  #8b949e;
+-  --text-code:   #79c0ff;
+-  --accent:      #238636;
+-  --accent-hi:   #2ea043;
+-  --red:         #da3633;
+-  --red-soft:    #3d1a1a;
+-  --green:       #238636;
+-  --green-soft:  #1a2e1a;
+-  --yellow:      #d29922;
+-  --yellow-soft: #2e2a1a;
+-  --blue:        #1f6feb;
+-  --blue-soft:   #1a2538;
+-  --radius:      8px;
+-  --font-sans:   -apple-system, "Segoe UI", system-ui, sans-serif;
+-  --font-mono:   "Cascadia Code", "Fira Code", "JetBrains Mono",
+-                 ui-monospace, "Courier New", monospace;
+-}
+-
+-html, body {
+-  height: 100%;
+-  background: var(--bg);
+-  color: var(--text);
+-  font-family: var(--font-sans);
+-  font-size: 14px;
+-  line-height: 1.6;
+-}
+-
+-/* ── Layout ───────────────────────────────────────────────────────────── */
+-.app-shell {
+-  max-width: 900px;
+-  margin: 0 auto;
+-  padding: 24px 20px 60px;
+-}
+-
+-header {
+-  display: flex;
+-  align-items: center;
+-  gap: 12px;
+-  margin-bottom: 28px;
+-  padding-bottom: 18px;
+-  border-bottom: 1px solid var(--border);
+-}
+-header .logo {
+-  font-size: 22px;
+-  font-weight: 700;
+-  letter-spacing: -0.5px;
+-  color: var(--text);
+-}
+-header .logo span { color: var(--border-hi); }
+-header .subtitle {
+-  font-size: 12px;
+-  color: var(--text-muted);
+-}
+-
+-/* ── Tabs ─────────────────────────────────────────────────────────────── */
+-.tabs {
+-  display: flex;
+-  gap: 2px;
+-  background: var(--surface);
+-  border: 1px solid var(--border);
+-  border-radius: var(--radius);
+-  padding: 4px;
+-  margin-bottom: 24px;
+-}
+-.tab-btn {
+-  flex: 1;
+-  padding: 8px 12px;
+-  border: none;
+-  background: transparent;
+-  color: var(--text-muted);
+-  font-size: 13px;
+-  font-weight: 500;
+-  border-radius: 6px;
+-  cursor: pointer;
+-  transition: background 0.15s, color 0.15s;
+-  white-space: nowrap;
+-}
+-.tab-btn:hover  { background: var(--surface2); color: var(--text); }
+-.tab-btn.active { background: var(--surface2); color: var(--text); box-shadow: 0 0 0 1px var(--border); }
+-
+-.tab-panel { display: none; }
+-.tab-panel.active { display: block; }
+-
+-/* ── Card / section ───────────────────────────────────────────────────── */
+-.card {
+-  background: var(--surface);
+-  border: 1px solid var(--border);
+-  border-radius: var(--radius);
+-  padding: 20px 22px;
+-  margin-bottom: 16px;
+-}
+-.card-title {
+-  font-size: 13px;
+-  font-weight: 600;
+-  color: var(--text-muted);
+-  text-transform: uppercase;
+-  letter-spacing: 0.5px;
+-  margin-bottom: 14px;
+-}
+-
+-/* ── Form elements ────────────────────────────────────────────────────── */
+-label {
+-  display: block;
+-  font-size: 13px;
+-  font-weight: 500;
+-  color: var(--text);
+-  margin-bottom: 6px;
+-}
+-.hint {
+-  font-size: 12px;
+-  color: var(--text-muted);
+-  margin-top: 4px;
+-}
+-
+-input[type="text"],
+-input[type="url"],
+-input[type="number"] {
+-  width: 100%;
+-  padding: 8px 12px;
+-  background: var(--bg);
+-  border: 1px solid var(--border);
+-  border-radius: 6px;
+-  color: var(--text);
+-  font-size: 13px;
+-  font-family: var(--font-sans);
+-  outline: none;
+-  transition: border-color 0.15s;
+-}
+-input[type="text"]:focus,
+-input[type="url"]:focus,
+-input[type="number"]:focus { border-color: var(--border-hi); }
+-input[type="text"].error,
+-input[type="url"].error,
+-input[type="number"].error { border-color: var(--red); }
+-
+-.field { margin-bottom: 14px; }
+-.inline-error {
+-  font-size: 12px;
+-  color: var(--red);
+-  margin-top: 4px;
+-  display: none;
+-}
+-.inline-error.visible { display: block; }
+-
+-/* ── Drop zone ────────────────────────────────────────────────────────── */
+-.drop-zone {
+-  border: 2px dashed var(--border);
+-  border-radius: var(--radius);
+-  padding: 32px 20px;
+-  text-align: center;
+-  cursor: pointer;
+-  transition: border-color 0.15s, background 0.15s;
+-  background: var(--bg);
+-  user-select: none;
+-}
+-.drop-zone:hover,
+-.drop-zone.drag-over {
+-  border-color: var(--border-hi);
+-  background: var(--blue-soft);
+-}
+-.drop-zone .dz-icon { font-size: 28px; margin-bottom: 8px; }
+-.drop-zone .dz-label {
+-  font-size: 14px;
+-  color: var(--text-muted);
+-}
+-.drop-zone .dz-label strong { color: var(--border-hi); }
+-.drop-zone .dz-selected {
+-  margin-top: 10px;
+-  font-size: 13px;
+-  color: var(--text);
+-  font-family: var(--font-mono);
+-  background: var(--surface2);
+-  padding: 4px 10px;
+-  border-radius: 4px;
+-  display: inline-block;
+-}
+-.drop-zone input[type="file"] { display: none; }
+-
+-/* ── Buttons ──────────────────────────────────────────────────────────── */
+-.btn {
+-  display: inline-flex;
+-  align-items: center;
+-  gap: 7px;
+-  padding: 9px 18px;
+-  border-radius: 6px;
+-  border: none;
+-  font-size: 13px;
+-  font-weight: 600;
+-  cursor: pointer;
+-  transition: opacity 0.15s, background 0.15s;
+-}
+-.btn-primary {
+-  background: var(--accent-hi);
+-  color: #fff;
+-}
+-.btn-primary:hover:not(:disabled) { background: #3aba56; }
+-.btn-secondary {
+-  background: var(--surface2);
+-  color: var(--text);
+-  border: 1px solid var(--border);
+-}
+-.btn-secondary:hover:not(:disabled) { border-color: var(--border-hi); }
+-.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+-
+-.spinner {
+-  width: 14px;
+-  height: 14px;
+-  border: 2px solid rgba(255,255,255,0.3);
+-  border-top-color: #fff;
+-  border-radius: 50%;
+-  animation: spin 0.7s linear infinite;
+-  display: none;
+-}
+-.btn.loading .spinner { display: inline-block; }
+-.btn.loading .btn-label::after { content: "…"; }
+-
+-@keyframes spin { to { transform: rotate(360deg); } }
+-
+-/* ── Error / notice banners ───────────────────────────────────────────── */
+-.banner {
+-  padding: 12px 16px;
+-  border-radius: 6px;
+-  font-size: 13px;
+-  margin-bottom: 16px;
+-  display: none;
+-  line-height: 1.5;
+-}
+-.banner.visible { display: block; }
+-.banner.error {
+-  background: var(--red-soft);
+-  border: 1px solid var(--red);
+-  color: #ff8b8b;
+-}
+-.banner.warn {
+-  background: var(--yellow-soft);
+-  border: 1px solid var(--yellow);
+-  color: #f0c060;
+-}
+-.banner.success {
+-  background: var(--green-soft);
+-  border: 1px solid var(--green);
+-  color: #6fcf97;
+-}
+-
+-/* ── Repo metadata summary ────────────────────────────────────────────── */
+-.repo-meta {
+-  display: flex;
+-  flex-wrap: wrap;
+-  gap: 10px;
+-  margin-bottom: 20px;
+-}
+-.meta-chip {
+-  background: var(--surface2);
+-  border: 1px solid var(--border);
+-  border-radius: 6px;
+-  padding: 6px 12px;
+-  font-size: 12px;
+-}
+-.meta-chip .mc-label { color: var(--text-muted); display: block; }
+-.meta-chip .mc-value {
+-  color: var(--text);
+-  font-weight: 700;
+-  font-size: 16px;
+-  font-family: var(--font-mono);
+-}
+-.meta-chip.warn-chip { border-color: var(--yellow); }
+-.meta-chip.warn-chip .mc-value { color: var(--yellow); }
+-
+-/* ── Spec summary ─────────────────────────────────────────────────────── */
+-.spec-meta {
+-  display: flex;
+-  flex-wrap: wrap;
+-  gap: 10px;
+-  margin-bottom: 20px;
+-}
+-
+-/* ── File result card ─────────────────────────────────────────────────── */
+-.file-card {
+-  border: 1px solid var(--border);
+-  border-radius: var(--radius);
+-  margin-bottom: 12px;
+-  overflow: hidden;
+-}
+-.file-card-header {
+-  display: flex;
+-  align-items: center;
+-  justify-content: space-between;
+-  padding: 10px 16px;
+-  background: var(--surface2);
+-  cursor: pointer;
+-  user-select: none;
+-  gap: 10px;
+-}
+-.file-card-header:hover { background: #212830; }
+-.file-path {
+-  font-family: var(--font-mono);
+-  font-size: 13px;
+-  color: var(--text-code);
+-  flex: 1;
+-  min-width: 0;
+-  overflow: hidden;
+-  text-overflow: ellipsis;
+-  white-space: nowrap;
+-}
+-.file-stats {
+-  display: flex;
+-  gap: 8px;
+-  flex-shrink: 0;
+-}
+-.stat-pill {
+-  font-size: 11px;
+-  font-weight: 600;
+-  padding: 2px 8px;
+-  border-radius: 12px;
+-}
+-.pill-green { background: var(--green-soft); color: #6fcf97; border: 1px solid var(--green); }
+-.pill-red   { background: var(--red-soft);   color: #ff8b8b; border: 1px solid var(--red); }
+-.pill-gray  { background: var(--surface2);   color: var(--text-muted); border: 1px solid var(--border); }
+-
+-.chevron { color: var(--text-muted); font-size: 12px; transition: transform 0.2s; }
+-.file-card.open .chevron { transform: rotate(90deg); }
+-
+-.file-card-body { display: none; padding: 14px 16px; background: var(--surface); }
+-.file-card.open .file-card-body { display: block; }
+-
+-.parse-error {
+-  font-size: 12px;
+-  color: var(--red);
+-  font-family: var(--font-mono);
+-  background: var(--red-soft);
+-  border: 1px solid var(--red);
+-  border-radius: 4px;
+-  padding: 8px 12px;
+-}
+-
+-/* ── Function result ──────────────────────────────────────────────────── */
+-.fn-block {
+-  border: 1px solid var(--border);
+-  border-radius: 6px;
+-  margin-bottom: 10px;
+-  overflow: hidden;
+-}
+-.fn-header {
+-  display: flex;
+-  align-items: center;
+-  gap: 8px;
+-  padding: 8px 14px;
+-  background: var(--surface2);
+-  cursor: pointer;
+-  user-select: none;
+-  flex-wrap: wrap;
+-}
+-.fn-header:hover { background: #212830; }
+-.fn-name {
+-  font-family: var(--font-mono);
+-  font-size: 13px;
+-  color: var(--text);
+-  font-weight: 600;
+-}
+-.fn-sig {
+-  font-family: var(--font-mono);
+-  font-size: 12px;
+-  color: var(--text-muted);
+-  flex: 1;
+-  min-width: 0;
+-  overflow: hidden;
+-  text-overflow: ellipsis;
+-  white-space: nowrap;
+-}
+-.fn-badges { display: flex; gap: 5px; align-items: center; flex-shrink: 0; }
+-
+-.badge {
+-  font-size: 10px;
+-  font-weight: 700;
+-  text-transform: uppercase;
+-  letter-spacing: 0.5px;
+-  padding: 2px 6px;
+-  border-radius: 4px;
+-}
+-.badge-llm   { background: #1d3557; color: var(--border-hi); border: 1px solid var(--blue); }
+-.badge-mock  { background: var(--yellow-soft); color: var(--yellow); border: 1px solid var(--yellow); }
+-
+-.fn-chevron { color: var(--text-muted); font-size: 11px; transition: transform 0.2s; }
+-.fn-block.open .fn-chevron { transform: rotate(90deg); }
+-
+-.fn-body { display: none; padding: 12px 14px; }
+-.fn-block.open .fn-body { display: block; }
+-
+-/* ── Stats row ────────────────────────────────────────────────────────── */
+-.stats-row {
+-  display: flex;
+-  gap: 16px;
+-  flex-wrap: wrap;
+-  margin-bottom: 12px;
+-  align-items: center;
+-}
+-.stat-item { font-size: 12px; }
+-.stat-item .si-label { color: var(--text-muted); margin-right: 4px; }
+-.stat-item .si-pass  { color: #6fcf97; font-weight: 700; }
+-.stat-item .si-fail  { color: #ff8b8b; font-weight: 700; }
+-.stat-item .si-val   { color: var(--text); font-weight: 600; }
+-
+-/* ── Coverage bar ─────────────────────────────────────────────────────── */
+-.cov-row { margin-bottom: 10px; }
+-.cov-label {
+-  font-size: 12px;
+-  color: var(--text-muted);
+-  margin-bottom: 4px;
+-  display: flex;
+-  justify-content: space-between;
+-}
+-.cov-label .cov-pct { color: var(--text); font-weight: 600; }
+-.cov-bar-track {
+-  height: 6px;
+-  background: var(--surface2);
+-  border-radius: 3px;
+-  overflow: hidden;
+-}
+-.cov-bar-fill {
+-  height: 100%;
+-  border-radius: 3px;
+-  background: var(--green);
+-  transition: width 0.4s ease;
+-}
+-.cov-bar-fill.mid  { background: var(--yellow); }
+-.cov-bar-fill.low  { background: var(--red); }
+-.cov-not-measured {
+-  font-size: 12px;
+-  color: var(--yellow);
+-  font-style: italic;
+-}
+-
+-/* ── Mock warning ─────────────────────────────────────────────────────── */
+-.mock-warning {
+-  background: var(--yellow-soft);
+-  border: 1px solid var(--yellow);
+-  border-radius: 5px;
+-  padding: 8px 12px;
+-  font-size: 12px;
+-  color: #f0c060;
+-  margin-bottom: 10px;
+-}
+-
+-/* ── Flags list ───────────────────────────────────────────────────────── */
+-.flags-list {
+-  list-style: none;
+-  margin-top: 8px;
+-}
+-.flags-list li {
+-  font-size: 12px;
+-  color: var(--text-muted);
+-  padding: 2px 0;
+-}
+-.flags-list li::before {
+-  content: "⚠ ";
+-  color: var(--yellow);
+-}
+-
+-/* ── Op card (spec results) ───────────────────────────────────────────── */
+-.op-card {
+-  border: 1px solid var(--border);
+-  border-radius: var(--radius);
+-  margin-bottom: 10px;
+-  overflow: hidden;
+-}
+-.op-header {
+-  display: flex;
+-  align-items: center;
+-  gap: 10px;
+-  padding: 10px 16px;
+-  background: var(--surface2);
+-  cursor: pointer;
+-  user-select: none;
+-  flex-wrap: wrap;
+-}
+-.op-header:hover { background: #212830; }
+-.op-method {
+-  font-size: 11px;
+-  font-weight: 700;
+-  font-family: var(--font-mono);
+-  padding: 2px 7px;
+-  border-radius: 4px;
+-  flex-shrink: 0;
+-}
+-.method-get    { background: #1a3328; color: #3fb950; border: 1px solid #238636; }
+-.method-post   { background: #1d3557; color: var(--border-hi); border: 1px solid var(--blue); }
+-.method-put    { background: #2e2a1a; color: var(--yellow); border: 1px solid var(--yellow); }
+-.method-delete { background: var(--red-soft); color: #ff8b8b; border: 1px solid var(--red); }
+-.method-patch  { background: #1d2538; color: #a5d6ff; border: 1px solid #58a6ff44; }
+-.method-gql    { background: #2d1a3a; color: #c792ea; border: 1px solid #7c3aed44; }
+-.method-other  { background: var(--surface2); color: var(--text-muted); border: 1px solid var(--border); }
+-
+-.op-path {
+-  font-family: var(--font-mono);
+-  font-size: 13px;
+-  color: var(--text);
+-  flex: 1;
+-}
+-.op-chevron { color: var(--text-muted); font-size: 12px; transition: transform 0.2s; margin-left: auto; }
+-.op-card.open .op-chevron { transform: rotate(90deg); }
+-
+-.op-body { display: none; padding: 12px 16px; background: var(--surface); }
+-.op-card.open .op-body { display: block; }
+-
+-/* ── Download button ──────────────────────────────────────────────────── */
+-.results-toolbar {
+-  display: flex;
+-  justify-content: flex-end;
+-  margin-bottom: 14px;
+-}
+-
+-/* ── Empty / loading state ────────────────────────────────────────────── */
+-.empty-state {
+-  text-align: center;
+-  padding: 48px 20px;
+-  color: var(--text-muted);
+-}
+-.empty-state .es-icon { font-size: 36px; margin-bottom: 10px; }
+-.empty-state .es-text { font-size: 14px; }
+-
+-/* ── Scrollbar ────────────────────────────────────────────────────────── */
+-::-webkit-scrollbar { width: 6px; height: 6px; }
+-::-webkit-scrollbar-track { background: var(--bg); }
+-::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+-::-webkit-scrollbar-thumb:hover { background: #484f58; }
+diff --git a/petstore.json b/petstore.json
+deleted file mode 100644
+index 0c7cc75..0000000
+--- a/petstore.json
++++ /dev/null
+@@ -1 +0,0 @@
+-{"swagger":"2.0","info":{"description":"This is a sample server Petstore server.  You can find out more about Swagger at [http://swagger.io](http://swagger.io) or on [irc.freenode.net, #swagger](http://swagger.io/irc/).  For this sample, you can use the api key `special-key` to test the authorization filters.","version":"1.0.7","title":"Swagger Petstore","termsOfService":"http://swagger.io/terms/","contact":{"email":"apiteam@swagger.io"},"license":{"name":"Apache 2.0","url":"http://www.apache.org/licenses/LICENSE-2.0.html"}},"host":"petstore.swagger.io","basePath":"/v2","tags":[{"name":"pet","description":"Everything about your Pets","externalDocs":{"description":"Find out more","url":"http://swagger.io"}},{"name":"store","description":"Access to Petstore orders"},{"name":"user","description":"Operations about user","externalDocs":{"description":"Find out more about our store","url":"http://swagger.io"}}],"schemes":["https","http"],"paths":{"/pet/{petId}/uploadImage":{"post":{"tags":["pet"],"summary":"uploads an image","description":"","operationId":"uploadFile","consumes":["multipart/form-data"],"produces":["application/json"],"parameters":[{"name":"petId","in":"path","description":"ID of pet to update","required":true,"type":"integer","format":"int64"},{"name":"additionalMetadata","in":"formData","description":"Additional data to pass to server","required":false,"type":"string"},{"name":"file","in":"formData","description":"file to upload","required":false,"type":"file"}],"responses":{"200":{"description":"successful operation","schema":{"$ref":"#/definitions/ApiResponse"}}},"security":[{"petstore_auth":["write:pets","read:pets"]}]}},"/pet":{"post":{"tags":["pet"],"summary":"Add a new pet to the store","description":"","operationId":"addPet","consumes":["application/json","application/xml"],"produces":["application/json","application/xml"],"parameters":[{"in":"body","name":"body","description":"Pet object that needs to be added to the store","required":true,"schema":{"$ref":"#/definitions/Pet"}}],"responses":{"405":{"description":"Invalid input"}},"security":[{"petstore_auth":["write:pets","read:pets"]}]},"put":{"tags":["pet"],"summary":"Update an existing pet","description":"","operationId":"updatePet","consumes":["application/json","application/xml"],"produces":["application/json","application/xml"],"parameters":[{"in":"body","name":"body","description":"Pet object that needs to be added to the store","required":true,"schema":{"$ref":"#/definitions/Pet"}}],"responses":{"400":{"description":"Invalid ID supplied"},"404":{"description":"Pet not found"},"405":{"description":"Validation exception"}},"security":[{"petstore_auth":["write:pets","read:pets"]}]}},"/pet/findByStatus":{"get":{"tags":["pet"],"summary":"Finds Pets by status","description":"Multiple status values can be provided with comma separated strings","operationId":"findPetsByStatus","produces":["application/json","application/xml"],"parameters":[{"name":"status","in":"query","description":"Status values that need to be considered for filter","required":true,"type":"array","items":{"type":"string","enum":["available","pending","sold"],"default":"available"},"collectionFormat":"multi"}],"responses":{"200":{"description":"successful operation","schema":{"type":"array","items":{"$ref":"#/definitions/Pet"}}},"400":{"description":"Invalid status value"}},"security":[{"petstore_auth":["write:pets","read:pets"]}]}},"/pet/findByTags":{"get":{"tags":["pet"],"summary":"Finds Pets by tags","description":"Multiple tags can be provided with comma separated strings. Use tag1, tag2, tag3 for testing.","operationId":"findPetsByTags","produces":["application/json","application/xml"],"parameters":[{"name":"tags","in":"query","description":"Tags to filter by","required":true,"type":"array","items":{"type":"string"},"collectionFormat":"multi"}],"responses":{"200":{"description":"successful operation","schema":{"type":"array","items":{"$ref":"#/definitions/Pet"}}},"400":{"description":"Invalid tag value"}},"security":[{"petstore_auth":["write:pets","read:pets"]}],"deprecated":true}},"/pet/{petId}":{"get":{"tags":["pet"],"summary":"Find pet by ID","description":"Returns a single pet","operationId":"getPetById","produces":["application/json","application/xml"],"parameters":[{"name":"petId","in":"path","description":"ID of pet to return","required":true,"type":"integer","format":"int64"}],"responses":{"200":{"description":"successful operation","schema":{"$ref":"#/definitions/Pet"}},"400":{"description":"Invalid ID supplied"},"404":{"description":"Pet not found"}},"security":[{"api_key":[]}]},"post":{"tags":["pet"],"summary":"Updates a pet in the store with form data","description":"","operationId":"updatePetWithForm","consumes":["application/x-www-form-urlencoded"],"produces":["application/json","application/xml"],"parameters":[{"name":"petId","in":"path","description":"ID of pet that needs to be updated","required":true,"type":"integer","format":"int64"},{"name":"name","in":"formData","description":"Updated name of the pet","required":false,"type":"string"},{"name":"status","in":"formData","description":"Updated status of the pet","required":false,"type":"string"}],"responses":{"405":{"description":"Invalid input"}},"security":[{"petstore_auth":["write:pets","read:pets"]}]},"delete":{"tags":["pet"],"summary":"Deletes a pet","description":"","operationId":"deletePet","produces":["application/json","application/xml"],"parameters":[{"name":"api_key","in":"header","required":false,"type":"string"},{"name":"petId","in":"path","description":"Pet id to delete","required":true,"type":"integer","format":"int64"}],"responses":{"400":{"description":"Invalid ID supplied"},"404":{"description":"Pet not found"}},"security":[{"petstore_auth":["write:pets","read:pets"]}]}},"/store/inventory":{"get":{"tags":["store"],"summary":"Returns pet inventories by status","description":"Returns a map of status codes to quantities","operationId":"getInventory","produces":["application/json"],"parameters":[],"responses":{"200":{"description":"successful operation","schema":{"type":"object","additionalProperties":{"type":"integer","format":"int32"}}}},"security":[{"api_key":[]}]}},"/store/order":{"post":{"tags":["store"],"summary":"Place an order for a pet","description":"","operationId":"placeOrder","consumes":["application/json"],"produces":["application/json","application/xml"],"parameters":[{"in":"body","name":"body","description":"order placed for purchasing the pet","required":true,"schema":{"$ref":"#/definitions/Order"}}],"responses":{"200":{"description":"successful operation","schema":{"$ref":"#/definitions/Order"}},"400":{"description":"Invalid Order"}}}},"/store/order/{orderId}":{"get":{"tags":["store"],"summary":"Find purchase order by ID","description":"For valid response try integer IDs with value >= 1 and <= 10. Other values will generated exceptions","operationId":"getOrderById","produces":["application/json","application/xml"],"parameters":[{"name":"orderId","in":"path","description":"ID of pet that needs to be fetched","required":true,"type":"integer","maximum":10,"minimum":1,"format":"int64"}],"responses":{"200":{"description":"successful operation","schema":{"$ref":"#/definitions/Order"}},"400":{"description":"Invalid ID supplied"},"404":{"description":"Order not found"}}},"delete":{"tags":["store"],"summary":"Delete purchase order by ID","description":"For valid response try integer IDs with positive integer value. Negative or non-integer values will generate API errors","operationId":"deleteOrder","produces":["application/json","application/xml"],"parameters":[{"name":"orderId","in":"path","description":"ID of the order that needs to be deleted","required":true,"type":"integer","minimum":1,"format":"int64"}],"responses":{"400":{"description":"Invalid ID supplied"},"404":{"description":"Order not found"}}}},"/user/createWithList":{"post":{"tags":["user"],"summary":"Creates list of users with given input array","description":"","operationId":"createUsersWithListInput","consumes":["application/json"],"produces":["application/json","application/xml"],"parameters":[{"in":"body","name":"body","description":"List of user object","required":true,"schema":{"type":"array","items":{"$ref":"#/definitions/User"}}}],"responses":{"default":{"description":"successful operation"}}}},"/user/{username}":{"get":{"tags":["user"],"summary":"Get user by user name","description":"","operationId":"getUserByName","produces":["application/json","application/xml"],"parameters":[{"name":"username","in":"path","description":"The name that needs to be fetched. Use user1 for testing. ","required":true,"type":"string"}],"responses":{"200":{"description":"successful operation","schema":{"$ref":"#/definitions/User"}},"400":{"description":"Invalid username supplied"},"404":{"description":"User not found"}}},"put":{"tags":["user"],"summary":"Updated user","description":"This can only be done by the logged in user.","operationId":"updateUser","consumes":["application/json"],"produces":["application/json","application/xml"],"parameters":[{"name":"username","in":"path","description":"name that need to be updated","required":true,"type":"string"},{"in":"body","name":"body","description":"Updated user object","required":true,"schema":{"$ref":"#/definitions/User"}}],"responses":{"400":{"description":"Invalid user supplied"},"404":{"description":"User not found"}}},"delete":{"tags":["user"],"summary":"Delete user","description":"This can only be done by the logged in user.","operationId":"deleteUser","produces":["application/json","application/xml"],"parameters":[{"name":"username","in":"path","description":"The name that needs to be deleted","required":true,"type":"string"}],"responses":{"400":{"description":"Invalid username supplied"},"404":{"description":"User not found"}}}},"/user/login":{"get":{"tags":["user"],"summary":"Logs user into the system","description":"","operationId":"loginUser","produces":["application/json","application/xml"],"parameters":[{"name":"username","in":"query","description":"The user name for login","required":true,"type":"string"},{"name":"password","in":"query","description":"The password for login in clear text","required":true,"type":"string"}],"responses":{"200":{"description":"successful operation","headers":{"X-Expires-After":{"type":"string","format":"date-time","description":"date in UTC when token expires"},"X-Rate-Limit":{"type":"integer","format":"int32","description":"calls per hour allowed by the user"}},"schema":{"type":"string"}},"400":{"description":"Invalid username/password supplied"}}}},"/user/logout":{"get":{"tags":["user"],"summary":"Logs out current logged in user session","description":"","operationId":"logoutUser","produces":["application/json","application/xml"],"parameters":[],"responses":{"default":{"description":"successful operation"}}}},"/user/createWithArray":{"post":{"tags":["user"],"summary":"Creates list of users with given input array","description":"","operationId":"createUsersWithArrayInput","consumes":["application/json"],"produces":["application/json","application/xml"],"parameters":[{"in":"body","name":"body","description":"List of user object","required":true,"schema":{"type":"array","items":{"$ref":"#/definitions/User"}}}],"responses":{"default":{"description":"successful operation"}}}},"/user":{"post":{"tags":["user"],"summary":"Create user","description":"This can only be done by the logged in user.","operationId":"createUser","consumes":["application/json"],"produces":["application/json","application/xml"],"parameters":[{"in":"body","name":"body","description":"Created user object","required":true,"schema":{"$ref":"#/definitions/User"}}],"responses":{"default":{"description":"successful operation"}}}}},"securityDefinitions":{"api_key":{"type":"apiKey","name":"api_key","in":"header"},"petstore_auth":{"type":"oauth2","authorizationUrl":"https://petstore.swagger.io/oauth/authorize","flow":"implicit","scopes":{"read:pets":"read your pets","write:pets":"modify pets in your account"}}},"definitions":{"ApiResponse":{"type":"object","properties":{"code":{"type":"integer","format":"int32"},"type":{"type":"string"},"message":{"type":"string"}}},"Category":{"type":"object","properties":{"id":{"type":"integer","format":"int64"},"name":{"type":"string"}},"xml":{"name":"Category"}},"Pet":{"type":"object","required":["name","photoUrls"],"properties":{"id":{"type":"integer","format":"int64"},"category":{"$ref":"#/definitions/Category"},"name":{"type":"string","example":"doggie"},"photoUrls":{"type":"array","xml":{"wrapped":true},"items":{"type":"string","xml":{"name":"photoUrl"}}},"tags":{"type":"array","xml":{"wrapped":true},"items":{"xml":{"name":"tag"},"$ref":"#/definitions/Tag"}},"status":{"type":"string","description":"pet status in the store","enum":["available","pending","sold"]}},"xml":{"name":"Pet"}},"Tag":{"type":"object","properties":{"id":{"type":"integer","format":"int64"},"name":{"type":"string"}},"xml":{"name":"Tag"}},"Order":{"type":"object","properties":{"id":{"type":"integer","format":"int64"},"petId":{"type":"integer","format":"int64"},"quantity":{"type":"integer","format":"int32"},"shipDate":{"type":"string","format":"date-time"},"status":{"type":"string","description":"Order Status","enum":["placed","approved","delivered"]},"complete":{"type":"boolean"}},"xml":{"name":"Order"}},"User":{"type":"object","properties":{"id":{"type":"integer","format":"int64"},"username":{"type":"string"},"firstName":{"type":"string"},"lastName":{"type":"string"},"email":{"type":"string"},"password":{"type":"string"},"phone":{"type":"string"},"userStatus":{"type":"integer","format":"int32","description":"User Status"}},"xml":{"name":"User"}}},"externalDocs":{"description":"Find out more about Swagger","url":"http://swagger.io"}}
+\ No newline at end of file
+diff --git a/scripts/setup-dev-tools.sh b/scripts/setup-dev-tools.sh
+old mode 100644
+new mode 100755

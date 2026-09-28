@@ -70,6 +70,18 @@ def _env_adjust(diag: Diagnostic) -> Diagnostic:
     return diag
 
 
+def _fallback(res: "sandbox.ProcResult", diags: list[Diagnostic], tool: str) -> list[Diagnostic]:
+    """A checker that exits non-zero must never look clean, even if its output
+    format was not recognised (tool versions word their messages differently)."""
+    if res.returncode in (0, 127) or res.timed_out or diags:
+        return diags
+    lines = [ln.strip() for ln in res.output.splitlines() if ln.strip()]
+    first = next((ln for ln in lines if re.search(r"error", ln, re.I)), lines[0] if lines else "")
+    m = re.search(r":(\d+):", first) or re.search(r"line (\d+)", first)
+    message = first or f"{tool} exited with status {res.returncode}"
+    return [Diagnostic(int(m.group(1)) if m else None, None, "error", message[:500], tool)]
+
+
 def _parse_gnu(output: str, filename: str, tool: str, default_sev: str = "error") -> list[Diagnostic]:
     diags = []
     for line in output.splitlines():
@@ -200,7 +212,7 @@ def _gcc_like(compiler: str, std: str):
                            "-fdiagnostics-color=never", filename], workdir, timeout=TOOL_TIMEOUT)
         if res.timed_out:
             return [], [ToolRun(compiler, "timeout")]
-        return _parse_gnu(res.stderr, filename, compiler), [ToolRun(compiler, "ran")]
+        return _fallback(res, _parse_gnu(res.stderr, filename, compiler), compiler), [ToolRun(compiler, "ran")]
     return check
 
 
@@ -222,20 +234,50 @@ def _check_java(workdir: Path, filename: str, source: str):
                 col = follow.index("^") + 1
                 break
         diags.append(_env_adjust(Diagnostic(int(m.group(1)), col, _severity(m.group(2)), m.group(3), "javac")))
-    return diags, [ToolRun("javac", "ran")]
+    return _fallback(res, diags, "javac"), [ToolRun("javac", "ran")]
 
 
 def _check_ruby(workdir: Path, filename: str, source: str):
     if sandbox.which("ruby") is None:
         return [], [ToolRun("ruby -wc", "unavailable", "Ruby is not installed")]
     res = sandbox.run(["ruby", "-wc", filename], workdir, timeout=TOOL_TIMEOUT)
-    diags = []
-    for line in res.stderr.splitlines():
-        m = re.match(rf"^(?:ruby: )?{re.escape(filename)}:(\d+):\s*(warning: )?(.+)$", line.strip())
+    if res.timed_out:
+        return [], [ToolRun("ruby -wc", "timeout")]
+    return _fallback(res, parse_ruby_check(res.output, filename), "ruby -wc"), [ToolRun("ruby -wc", "ran")]
+
+
+def parse_ruby_check(output: str, filename: str) -> list[Diagnostic]:
+    """Parse `ruby -wc` output from both parse.y (Ruby <= 3.3) and Prism (3.4+).
+
+    parse.y:  [ruby: ]x.rb:2: syntax error, unexpected integer literal ... (SyntaxError)
+              x.rb:5: warning: assigned but unused variable - y
+    Prism:    ruby: x.rb:3: syntax errors found (SyntaxError)
+                > 2 |   1
+                    |   ^ unexpected integer; expected a `)` to close the parameters
+    """
+    header = re.compile(rf"(?:^|[\s:]){re.escape(filename)}:(\d+):\s*(warning: )?(.+)$")
+    prism_line = re.compile(r"^>\s*(\d+)\s*\|")
+    prism_msg = re.compile(r"^\|\s*\^+~*\s*(.+)$")
+    diags: list[Diagnostic] = []
+    prism: list[Diagnostic] = []
+    current = None
+    for raw in output.splitlines():
+        line = raw.strip()
+        m = header.search(line)
         if m:
             diags.append(Diagnostic(int(m.group(1)), None, "warning" if m.group(2) else "error",
                                     m.group(3).strip(), "ruby -wc"))
-    return diags, [ToolRun("ruby -wc", "ran")]
+            continue
+        m = prism_line.match(line)
+        if m:
+            current = int(m.group(1))
+            continue
+        m = prism_msg.match(line)
+        if m and current is not None:
+            prism.append(Diagnostic(current, None, "error", m.group(1).strip(), "ruby -wc"))
+    if prism:  # Prism's per-error lines are more precise than its "syntax errors found" header
+        diags = [d for d in diags if "syntax errors found" not in d.message] + prism
+    return diags
 
 
 def _check_php(workdir: Path, filename: str, source: str):
@@ -248,7 +290,7 @@ def _check_php(workdir: Path, filename: str, source: str):
         if m:
             sev = "warning" if m.group(1) in {"Warning", "Deprecated"} else "error"
             diags.append(Diagnostic(int(m.group(3)), None, sev, f"{m.group(1)}: {m.group(2)}", "php -l"))
-    return diags, [ToolRun("php -l", "ran")]
+    return _fallback(res, diags, "php -l"), [ToolRun("php -l", "ran")]
 
 
 def _check_rust(workdir: Path, filename: str, source: str):
@@ -281,9 +323,10 @@ def _check_shell(workdir: Path, filename: str, source: str):
         res = sandbox.run(["bash", "-n", filename], workdir, timeout=TOOL_TIMEOUT)
         runs.append(ToolRun("bash -n", "ran"))
         for line in res.stderr.splitlines():
-            m = re.match(rf"^{re.escape(filename)}: line (\d+): (.+)$", line.strip())
+            m = re.search(rf"{re.escape(filename)}: line (\d+): (.+)$", line.strip())
             if m:
                 diags.append(Diagnostic(int(m.group(1)), None, "error", m.group(2), "bash -n"))
+        diags = _fallback(res, diags, "bash -n")
     if sandbox.which("shellcheck"):
         res = sandbox.run(["shellcheck", "-f", "json", filename], workdir, timeout=TOOL_TIMEOUT)
         runs.append(ToolRun("shellcheck", "ran"))

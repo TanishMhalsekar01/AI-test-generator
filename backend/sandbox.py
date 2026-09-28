@@ -31,8 +31,13 @@ except ImportError:  # pragma: no cover - non-POSIX
 
 MAX_OUTPUT_CHARS = 20000
 
-_PASS_THROUGH = ("PATH", "LANG", "LC_ALL", "JAVA_HOME", "GOROOT", "RUSTUP_HOME", "CARGO_HOME", "NODE_PATH")
+_PASS_THROUGH = ("PATH", "LANG", "LC_ALL", "JAVA_HOME", "GOROOT", "RUSTUP_HOME", "CARGO_HOME", "NODE_PATH",
+                 "GEM_HOME", "GEM_PATH")
 _SHARED_CACHE = Path(tempfile.gettempdir()) / "aitestgen-cache"
+# Toolchain managers that locate their installs under $HOME. The sandbox replaces
+# HOME with the throwaway workdir, so point them at the real locations instead
+# (e.g. rustup on GitHub runners keeps toolchains in ~/.rustup without RUSTUP_HOME set).
+_HOME_TOOLCHAINS = {"RUSTUP_HOME": ".rustup", "CARGO_HOME": ".cargo"}
 
 
 @dataclass
@@ -66,6 +71,11 @@ def _sandbox_ids() -> Optional[tuple[int, int]]:
 def scrubbed_env(workdir: Path, extra: Optional[dict] = None) -> dict:
     env = {k: os.environ[k] for k in _PASS_THROUGH if k in os.environ}
     env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
+    if _sandbox_ids() is None:  # a dropped-privilege sandbox user cannot read our home anyway
+        real_home = Path.home()
+        for var, sub in _HOME_TOOLCHAINS.items():
+            if var not in env and (real_home / sub).is_dir():
+                env[var] = str(real_home / sub)
     cache = _SHARED_CACHE
     # TMPDIR must differ from the working directory: Go ignores a go.mod that
     # sits in the temp root.

@@ -113,3 +113,18 @@ def test_parse_tap_skips_suites():
     tests = executors.parse_tap(tap)
     assert [(t["name"], t["status"]) for t in tests] == [("inner", "passed"), ("broken", "failed")]
     assert "boom" in tests[1]["message"]
+
+
+def test_sandbox_finds_rustup_toolchains_without_rustup_home(tmp_path, monkeypatch):
+    # GitHub runners keep toolchains in ~/.rustup without exporting RUSTUP_HOME; the sandbox
+    # swaps HOME for the workdir, so it must point rustup at the real location.
+    fake_home = tmp_path / "home"
+    (fake_home / ".rustup").mkdir(parents=True)
+    (fake_home / ".cargo").mkdir()
+    monkeypatch.delenv("RUSTUP_HOME", raising=False)
+    monkeypatch.delenv("CARGO_HOME", raising=False)
+    monkeypatch.setattr(sandbox.Path, "home", classmethod(lambda cls: fake_home))
+    env = sandbox.scrubbed_env(tmp_path / "work")
+    assert env["RUSTUP_HOME"] == str(fake_home / ".rustup")
+    assert env["CARGO_HOME"] == str(fake_home / ".cargo")
+    assert env["HOME"] == str(tmp_path / "work")
