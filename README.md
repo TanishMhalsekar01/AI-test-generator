@@ -229,9 +229,10 @@ database connection can.
 1. Push this repository to GitHub. In Render: **New → Blueprint** → select the repository.
    [`render.yaml`](render.yaml) creates the Docker web service `ai-test-generator` with a health
    check at `/healthz` and the domains `aitestge.stream` and `www.aitestge.stream`.
-2. Enter the secret environment variables in the Render dashboard: `GEMINI_API_KEY`,
-   `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `DATABASE_URL`. `SESSION_SECRET` is generated
-   automatically.
+2. Enter the environment variables marked `sync: false` in the Render dashboard: `GEMINI_API_KEY`,
+   `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `DATABASE_URL` and `APP_BASE_URL` (the public URL,
+   e.g. `https://aitestge.stream`). `SESSION_SECRET` is generated automatically. The Gemini key must
+   belong to a Google AI project with billing enabled (see [Gemini quota](#gemini-quota)).
 3. **Register the domain** `aitestge.stream` with any registrar if you have not already.
 4. **DNS**: in Render, open the service → **Settings → Custom Domains** and create the records it
    shows at your DNS provider. At the time of writing these are:
@@ -245,8 +246,8 @@ database connection can.
    once DNS resolves. The app forces HTTPS in production (HSTS).
 5. Update the GitHub OAuth App's callback URL to `https://aitestge.stream/auth/github/callback`.
 
-Until DNS is live, set `APP_BASE_URL` to the `https://ai-test-generator.onrender.com` URL and use it
-in the OAuth App. In production, `www.aitestge.stream` redirects to `aitestge.stream` and HTTP redirects
+Until DNS is live, set `APP_BASE_URL` to the service's `https://<name>.onrender.com` URL and use
+`https://<name>.onrender.com/auth/github/callback` as the OAuth App's callback URL. In production, `www.aitestge.stream` redirects to `aitestge.stream` and HTTP redirects
 to HTTPS.
 
 ---

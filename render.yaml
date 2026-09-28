@@ -15,8 +15,10 @@ services:
     envVars:
       - key: APP_ENV
         value: production
+      # Set in the dashboard, not here, so a Blueprint sync never overwrites it: the public URL the
+      # site is opened on (https://aitestge.stream once DNS works, else the *.onrender.com URL).
       - key: APP_BASE_URL
-        value: https://aitestge.stream
+        sync: false
       - key: GEMINI_MODEL
         value: gemini-3.1-pro-preview
       - key: GEMINI_API_KEY
