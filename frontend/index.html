@@ -1,162 +1,75 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AI Test Generator</title>
-  <link rel="stylesheet" href="style.css" />
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Test Generator — Sign in</title>
+  <meta name="description" content="Review source code in any language, run generated tests in a sandbox, and check OpenAPI, GraphQL and JSON contracts.">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/css/app.css">
 </head>
 <body>
-<div class="app-shell">
-
-  <!-- ── Header ──────────────────────────────────────────────────────── -->
-  <header>
-    <div>
-      <div class="logo">AI <span>Test</span> Generator</div>
-      <div class="subtitle">Parse → Generate → Run → Report</div>
-    </div>
+<div class="signin-page">
+  <header class="signin-top">
+    <a class="brand" href="/"><img class="brand-mark" src="/assets/favicon.svg" alt="">AI Test Generator</a>
   </header>
 
-  <!-- ── Global error banner ─────────────────────────────────────────── -->
-  <div id="global-banner" class="banner"></div>
+  <main class="signin-main">
+    <section>
+      <h1>Sign in to continue</h1>
+      <p class="lead">
+        Reviews source code in any language, runs the generated tests in a sandbox, and checks
+        OpenAPI, GraphQL and JSON contracts. Every run is stored against your GitHub account and
+        repositories, so you and your team can compare results over time.
+      </p>
 
-  <!-- ── Tabs ────────────────────────────────────────────────────────── -->
-  <div class="tabs" role="tablist">
-    <button class="tab-btn active" data-tab="tab-analyze"      role="tab">🐍 Python File</button>
-    <button class="tab-btn"        data-tab="tab-repo"         role="tab">🐙 GitHub Repo</button>
-    <button class="tab-btn"        data-tab="tab-spec"         role="tab">📄 API Spec</button>
-  </div>
-
-  <!-- ══════════════════════════════════════════════════════════════════
-       TAB 1 — Upload .py file  →  POST /analyze
-  ══════════════════════════════════════════════════════════════════════ -->
-  <div id="tab-analyze" class="tab-panel active">
-    <div class="card">
-      <div class="card-title">Upload a Python file</div>
-
-      <!-- Drop zone -->
-      <div id="dz-py" class="drop-zone" tabindex="0" role="button"
-           aria-label="Drop a .py file here or click to browse">
-        <input type="file" id="dz-py-input" accept=".py" />
-        <div class="dz-icon">🐍</div>
-        <div class="dz-label">
-          Drop a <strong>.py</strong> file here, or <strong>click to browse</strong>
-        </div>
-        <span id="dz-py-name" class="dz-selected" style="display:none"></span>
+      <div id="signin-error" class="banner error hidden" role="alert">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v6M12 16.5v.5"/></svg>
+        <div><strong id="signin-error-title">Sign-in failed</strong><span id="signin-error-text"></span></div>
       </div>
 
-      <div style="margin-top:16px;display:flex;gap:10px;align-items:center">
-        <button id="btn-analyze" class="btn btn-primary" disabled>
-          <span class="spinner"></span>
-          <span class="btn-label">Analyze</span>
-        </button>
-        <span style="font-size:12px;color:var(--text-muted)">
-          Parses functions, generates pytest tests, runs them with coverage
-        </span>
-      </div>
-    </div>
-  </div>
+      <a class="btn btn-primary btn-github" href="/auth/github/login">
+        <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+        Sign in with GitHub
+      </a>
+      <p class="scopes">
+        GitHub will ask for read access to your profile, organizations and repositories
+        (scopes <code>read:user</code>, <code>read:org</code>, <code>repo</code>). Code you analyze is sent to
+        Google Gemini (<code>gemini-3.7-flash</code>) for review; the API key never leaves the server.
+      </p>
+    </section>
 
-  <!-- ══════════════════════════════════════════════════════════════════
-       TAB 2 — GitHub repo  →  POST /analyze-repo
-  ══════════════════════════════════════════════════════════════════════ -->
-  <div id="tab-repo" class="tab-panel">
-    <div class="card">
-      <div class="card-title">Analyze a GitHub repository</div>
+    <section aria-label="What the tool does">
+      <ul class="capabilities">
+        <li>
+          <h3>Code review</h3>
+          <p>Upload or paste files in any language. Compiler and linter diagnostics, AI-reported defects with line numbers, and generated unit tests.</p>
+        </li>
+        <li>
+          <h3>Test execution</h3>
+          <p>Generated tests run in an isolated sandbox for Python, JavaScript, Go, Ruby and Rust. Failing tests are triaged as code defects or wrong expectations.</p>
+        </li>
+        <li>
+          <h3>Repository analysis</h3>
+          <p>Analyze any repository your GitHub account can read, pinned to a commit, including private and organization repositories.</p>
+        </li>
+        <li>
+          <h3>API and data contracts</h3>
+          <p>Lint OpenAPI/Swagger, validate GraphQL SDL and JSON against JSON Schema, and check a live server against its documented contract.</p>
+        </li>
+        <li>
+          <h3>History and team dashboards</h3>
+          <p>Results per project and per GitHub organization, built only from runs your team has actually made.</p>
+        </li>
+      </ul>
+    </section>
+  </main>
 
-      <div class="field">
-        <label for="repo-url">GitHub repository URL</label>
-        <input
-          type="url"
-          id="repo-url"
-          placeholder="https://github.com/owner/repo"
-          autocomplete="off"
-          spellcheck="false"
-        />
-        <div id="repo-url-err" class="inline-error"></div>
-        <div class="hint">Public repos only. Trailing <code>.git</code> and whitespace are stripped automatically.</div>
-      </div>
-
-      <div class="field">
-        <label for="repo-max-files">Max .py files to fetch</label>
-        <input
-          type="number"
-          id="repo-max-files"
-          value="20"
-          min="1"
-          max="200"
-          style="width:120px"
-        />
-        <div class="hint">Caps how many Python files are fetched from the repo (1–200). Remaining files are skipped and reported.</div>
-      </div>
-
-      <div style="display:flex;gap:10px;align-items:center">
-        <button id="btn-analyze-repo" class="btn btn-primary">
-          <span class="spinner"></span>
-          <span class="btn-label">Analyze Repository</span>
-        </button>
-        <span style="font-size:12px;color:var(--text-muted)">
-          May take a minute for larger repos — each file runs the full pipeline
-        </span>
-      </div>
-    </div>
-  </div>
-
-  <!-- ══════════════════════════════════════════════════════════════════
-       TAB 3 — API spec  →  POST /analyze-spec
-  ══════════════════════════════════════════════════════════════════════ -->
-  <div id="tab-spec" class="tab-panel">
-    <div class="card">
-      <div class="card-title">Analyze an API spec</div>
-
-      <!-- Drop zone -->
-      <div id="dz-spec" class="drop-zone" tabindex="0" role="button"
-           aria-label="Drop an OpenAPI or GraphQL SDL file here or click to browse">
-        <input type="file" id="dz-spec-input" accept=".json,.yaml,.yml,.graphql,.gql,.sdl" />
-        <div class="dz-icon">📄</div>
-        <div class="dz-label">
-          Drop an <strong>OpenAPI / Swagger JSON or YAML</strong> or
-          <strong>GraphQL SDL</strong> file, or <strong>click to browse</strong>
-        </div>
-        <span id="dz-spec-name" class="dz-selected" style="display:none"></span>
-      </div>
-
-      <div class="field" style="margin-top:16px">
-        <label for="spec-base-url">
-          Base URL
-          <span style="font-size:11px;font-weight:400;color:var(--text-muted)">(optional — live mode)</span>
-        </label>
-        <input
-          type="url"
-          id="spec-base-url"
-          placeholder="http://localhost:8000"
-          autocomplete="off"
-        />
-        <div class="hint">
-          Leave blank for <strong>mock mode</strong> (HTTP calls are stubbed, no real server needed).
-          Supply a base URL to run tests against a live server.
-        </div>
-      </div>
-
-      <div style="display:flex;gap:10px;align-items:center">
-        <button id="btn-analyze-spec" class="btn btn-primary" disabled>
-          <span class="spinner"></span>
-          <span class="btn-label">Analyze Spec</span>
-        </button>
-        <span style="font-size:12px;color:var(--text-muted)">
-          Generates pytest tests for each endpoint or GraphQL operation
-        </span>
-      </div>
-    </div>
-  </div>
-
-  <!-- ══════════════════════════════════════════════════════════════════
-       Results section — shared across all tabs
-  ══════════════════════════════════════════════════════════════════════ -->
-  <div id="results-section"></div>
-
-</div><!-- /.app-shell -->
-
-<script src="app.js"></script>
+  <footer class="signin-foot">
+    <span>AI Test Generator</span>
+    <a href="https://github.com/TanishMhalsekar01/AI-test-generator">Source code</a>
+  </footer>
+</div>
+<script type="module" src="/assets/js/signin.js"></script>
 </body>
 </html>

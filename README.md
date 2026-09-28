@@ -1,425 +1,332 @@
 # AI Test Generator
 
-Built for [SkillUp Hackathon in collaboration with IBM] using **IBM Bob** as the primary development environment.
-=======
-AI Test Generator reads Python source code (or an API spec), extracts structured
-facts about every function or endpoint using deterministic static analysis, sends
-those facts to an LLM to produce a pytest test suite, then actually executes the
-generated tests with `pytest` + `coverage.py` and returns real pass/fail counts
-and coverage percentages. Nothing is mocked in the reporting — if a test fails,
-it failed; if coverage is 80%, it was measured as 80%.
+AI Test Generator reviews source code in any programming language, generates unit tests for it,
+executes those tests in a sandbox, and reports the defects it finds with line numbers. It also checks
+API contracts: OpenAPI/Swagger documents, GraphQL schemas and JSON/YAML data, including live checks
+against a running server. Users sign in with GitHub. Every run is stored against their account and
+repositories, so history and team dashboards show only real, recorded results.
 
-Built for IBM Hackathon using **IBM Bob** as the primary development environment.
->>>>>>> 349bef9 (Update AI test generator)
+- Production URL (after DNS setup): **https://aitestgen.dev**
+- Model: Google Gemini **`gemini-3.7-flash`** (server-side only)
+- Stack: FastAPI · SQLAlchemy (Supabase Postgres / SQLite) · vanilla HTML/CSS/JS · Docker on Render
 
 ---
 
-## The Problem
+## What it does
 
-Writing comprehensive unit tests is time-consuming and error-prone. Developers
-often test only the "happy path," forgetting edge cases like boundary values,
-invalid inputs, and exception handling. This is especially true for students
-and small teams without dedicated QA support, leading to bugs that surface
-only after deployment.
-
----
-
-## Architecture: the four-stage pipeline
-
-```
-Upload / Ingest  →  Parse (deterministic)  →  Generate (LLM)  →  Run + Report
-```
-
-| Stage | File | What it does |
-|---|---|---|
-| **1. Upload / Ingest** | `main.py` | Accepts a `.py` file upload, a public GitHub repo URL, or an API spec file. Routes the input to the correct pipeline. |
-| **2. Parse** | `parser.py` / `spec_parser.py` | Extracts structured facts — function signatures, conditions, raised exceptions, return values, risk flags — using Python's built-in `ast` module or a deterministic spec parser. **No AI involved here.** The LLM never sees raw source code. |
-| **3. Generate** | `llm.py` / `spec_llm.py` | Sends the structured facts (not raw code) to Llama 3.3 70B via Groq. Generates a complete pytest test suite covering normal paths, boundary conditions, invalid inputs, and declared error responses. |
-| **4. Run + Report** | `runner.py` | Writes the function source and generated tests to an isolated temp directory, executes them with `pytest --cov`, and returns actual pass/fail counts and a real coverage percentage. |
-| **GitHub fetcher** | `github_fetcher.py` | Walks a public repo's tree via the GitHub Contents API, downloads every `.py` file up to the configured cap, and feeds them individually through the pipeline. |
-
-### Why separate Parse from Generate?
-
-Sending raw source to an LLM produces tests that look plausible but often assert
-the wrong behavior. By extracting structured facts first (conditions, raises,
-returns, flags), the LLM prompt is grounded and significantly less likely to
-hallucinate assertions. This is the core architectural choice of the project.
-
-### Worked example
-
-**Input function:**
-```python
-def calculate_discount(price, discount_percent):
-    if discount_percent > 100:
-        raise ValueError("Discount cannot exceed 100%")
-    final_price = price - (price * discount_percent / 100)
-    return final_price
-```
-
-**What the parser extracts (this is what goes to the LLM):**
-```
-Function signature : calculate_discount(price, discount_percent)
-Logic summary      : Conditions: discount_percent > 100 | Raises: ValueError(...) | Returns: final_price
-Flags              : no validation found for parameter 'price'
-```
-
-**Result after running the generated tests:**
-```
-Tests generated: 8   Tests passed: 8   Coverage: 100%
-```
-
----
-
-## Three ways to submit code
-
-<<<<<<< HEAD
-- **Backend:** Python, FastAPI
-- **Parsing:** Python's built-in `ast` module + lightweight custom static analysis
-- **AI layer:** LLM API (openai/gpt-oss-120b) -- structured-prompt based test generation
-- **Test execution:** pytest + pytest-cov
-- **Development environment:** IBM Bob (see below)
-=======
-### `POST /analyze` — upload a single Python file
-
-Accepts a `.py` file upload. Runs the full pipeline for every top-level function
-in the file and returns results as a JSON array.
-
-```bash
-curl -X POST http://localhost:8000/analyze \
-     -F "file=@path/to/your_module.py"
-```
-
-**Response** — a JSON array, one object per top-level function:
-
-```json
-[
-  {
-    "name": "calculate_discount",
-    "signature": "calculate_discount(price, discount_percent)",
-    "docstring": null,
-    "conditions": ["discount_percent > 100"],
-    "raises": ["ValueError('Discount cannot exceed 100%')"],
-    "returns": ["final_price"],
-    "logic_summary": "Conditions: discount_percent > 100 | Raises: ... | Returns: final_price",
-    "flags": ["no validation found for parameter 'price'"],
-    "tests_generated": 8,
-    "tests_passed": 8,
-    "tests_failed": 0,
-    "coverage_percent": 100.0
-  }
-]
-```
-
----
-
-### `POST /analyze-repo` — analyze a public GitHub repository
-
-Accepts a JSON body with a GitHub repo URL and an optional file cap. Fetches
-every `.py` file up to `max_files`, runs each through the full pipeline, and
-returns a structured report object.
-
-```bash
-curl -X POST http://localhost:8000/analyze-repo \
-     -H "Content-Type: application/json" \
-     -d '{"github_url": "https://github.com/psf/requests", "max_files": 10}'
-```
-
-**Request body:**
-
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `github_url` | string | required | Full HTTPS URL of a public GitHub repo. Trailing `.git`, whitespace, and trailing slashes are normalised automatically. |
-| `max_files` | int | 50 | Maximum `.py` files to fetch and analyse (1–200). Files beyond the cap are counted and reported but not processed. |
-
-**Response** — a JSON object with top-level metadata and a `results` array:
-
-```json
-{
-  "max_files": 10,
-  "python_files_found": 47,
-  "files_selected": 10,
-  "files_skipped_due_to_limit": 37,
-  "files_analyzed": 10,
-  "results": [
-    {
-      "file": "src/adapters/utils.py",
-      "functions": [
-        {
-          "name": "to_key_val_list",
-          "signature": "to_key_val_list(value)",
-          "tests_generated": 5,
-          "tests_passed": 5,
-          "tests_failed": 0,
-          "coverage_percent": 94.3,
-          "generation_mode": "llm",
-          "coverage_status": "measured",
-          "warning": null
-        }
-      ]
-    }
-  ]
-}
-```
-
-**Error responses:**
-
-| Status | Condition |
+| Area | What happens |
 |---|---|
-| `400` | Invalid or non-GitHub URL; `max_files` outside 1–200 |
-| `502` | GitHub API failure (rate limit, repo not found, network timeout) |
+| **Code review** | Upload up to 10 files or paste code in any language. Each file goes through the real compiler or linter for its language (where installed), then Gemini reviews it for defects: logic errors, unhandled exceptions, null dereferences, security flaws, resource leaks, edge cases. Findings cite exact line numbers and include a suggested fix. |
+| **Test execution** | Gemini writes a test file in the language's standard framework. The tests assert the *intended* behaviour (from names, docstrings and types), so a failing test shows a bug. Tests run in a sandbox for **Python, JavaScript, Go, Ruby and Rust**. Each failure is then triaged as *code defect*, *wrong test expectation* or *sandbox limitation*. |
+| **Repository analysis** | Analyze any repository the signed-in GitHub account can read, including private and organization repositories, pinned to the current commit of a branch. Source files in every language are selected; vendor, build output, generated and minified files are skipped. |
+| **API & data contracts** | Lint OpenAPI 3.x / Swagger 2.0, validate GraphQL SDL, and validate JSON/YAML against a JSON Schema. With a base URL, check the live server: status codes must be documented, JSON bodies must match the schema, required parameters must be enforced, and GraphQL introspection is compared with the SDL. Gemini also writes a pytest suite per operation, which runs against the live server. |
+| **History & dashboards** | The Overview shows each project's latest result and a findings trend. History lists every run, filterable by project, type and scope. Team dashboards combine live GitHub organization data (repositories, members) with runs made by organization members. |
+
+Nothing is simulated. If the AI step fails, for example because of a quota limit, the report says so
+and shows "—" instead of zero. Tests for languages without a sandbox runner are marked
+"not executed" and never counted as passed.
 
 ---
 
-### `POST /analyze-spec` — analyze an OpenAPI/Swagger or GraphQL SDL spec
+## How a run works
 
-Accepts a spec file upload (or a `spec_url` form field pointing to a public URL).
-Detects the spec type automatically, extracts every endpoint or GraphQL operation,
-generates pytest tests using the `requests` library for each one, runs them, and
-returns a per-operation report.
-
-```bash
-# File upload (OpenAPI JSON or YAML, or GraphQL SDL)
-curl -X POST http://localhost:8000/analyze-spec \
-     -F "file=@openapi.json"
-
-# With a live server base URL (live mode)
-curl -X POST http://localhost:8000/analyze-spec \
-     -F "file=@openapi.json" \
-     -F "base_url=http://localhost:8080"
-
-# From a public URL instead of a file upload
-curl -X POST http://localhost:8000/analyze-spec \
-     -F "spec_url=https://petstore3.swagger.io/api/v3/openapi.json"
+```
+Sign in with GitHub ─► submit code / repository / spec ─► run is queued (stored in the DB)
+                                                             │
+        ┌────────────────────────────────────────────────────┘
+        ▼
+  1. Detect language (extension, shebang; unknown extensions are identified by the model)
+  2. Static checks ...... real compilers / linters, line + column diagnostics
+  3. AI review .......... gemini-3.7-flash: findings (severity, category, lines, fix) + a test file
+  4. Execute tests ...... sandboxed runner, per-test pass/fail + failure output + coverage
+  5. Triage failures .... gemini-3.7-flash: code defect vs wrong expectation, with the source line
+  6. Store report ....... summary + full report in the runs table ─► History / dashboards
 ```
 
-**Form fields:**
-
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `file` | file | — | Uploaded spec file. Mutually exclusive with `spec_url`. |
-| `spec_url` | string | — | URL of a publicly reachable spec. Mutually exclusive with `file`. |
-| `base_url` | string | `""` | Base URL for live mode. If omitted, tests stub HTTP calls with `responses` and require no running server. |
-
-**Response:**
-
-```json
-{
-  "spec_type": "openapi",
-  "operations_processed": 12,
-  "operations_skipped": 0,
-  "failed_operations": [],
-  "results": [
-    {
-      "operation": "GET /pets",
-      "spec_type": "openapi",
-      "method": "GET",
-      "path": "/pets",
-      "summary": "List all pets",
-      "logic_summary": "Optional params: limit(integer in query) | Success codes: 200 | Error codes: default",
-      "tests_generated": 1,
-      "tests_passed": 1,
-      "tests_failed": 0,
-      "coverage_percent": 0.0
-    }
-  ]
-}
-```
-
-**Supported spec formats:**
-
-| Format | Detection |
-|---|---|
-| OpenAPI 3.x | JSON or YAML containing an `"openapi"` key |
-| Swagger 2.x | JSON or YAML containing a `"swagger"` key |
-| GraphQL SDL | Text containing `type Query`, `type Mutation`, or `schema { }` |
-
-Operations beyond the 50-operation cap are counted and skipped; the response
-includes a `warning` field explaining how many were skipped.
+The browser polls `GET /api/runs/{id}` until the run completes. Runs execute on a background
+thread pool, so large repositories do not hold an HTTP request open.
 
 ---
 
-## `generation_mode` transparency
+## Language support
 
-Every function result in `/analyze-repo` (and fallback cases elsewhere) includes
-three transparency fields:
+Every language can be reviewed by the model. Deterministic checks and test execution depend on the
+toolchains installed on the server; the Docker image installs all of the tools below.
 
-| Field | `"llm"` mode | `"mock"` mode |
+| Language | Static checks | Tests executed in sandbox |
 |---|---|---|
-| `generation_mode` | `"llm"` | `"mock"` |
-| `coverage_status` | `"measured"` | `"not_measured"` |
-| `coverage_percent` | A real measured float (e.g. `94.3`) | `null` — explicitly not `0` |
-| `warning` | `null` | Explanation string |
+| Python | `ast` compile + pylint (errors & warnings) + AST facts | pytest + coverage |
+| JavaScript (CJS/ESM) | `node --check` | `node --test` + built-in coverage |
+| TypeScript | `tsc --noEmit --strict` | generated (Vitest), run locally |
+| Go | `gofmt -e`, `go vet` | `go test -json -cover` |
+| Rust | `rustc` (JSON diagnostics) | `rustc --test` |
+| Ruby | `ruby -wc` | Minitest |
+| C / C++ | `gcc` / `g++ -fsyntax-only -Wall -Wextra` | generated, run locally |
+| Java | `javac -Xlint:all` | generated (JUnit 5), run locally |
+| PHP | `php -l` | generated (PHPUnit), run locally |
+| Shell | `bash -n`, shellcheck | generated (bats), run locally |
+| Kotlin, C#, Swift, Scala, Dart, SQL, R, Lua, Perl, Haskell, Elixir, Solidity, Terraform, … | AI review only | generated in the conventional framework, run locally |
 
-**Why `null` instead of `0` for mock coverage?**
+When a toolchain is missing, the report says "unavailable" for that tool rather than silently
+skipping it. Diagnostics caused by missing third-party dependencies are downgraded to *info* with
+the note "dependency not available in the analysis sandbox".
 
-In mock mode, the placeholder test is `def test_fn_placeholder(): pass` — it
-runs and passes, but it never imports or calls the target function. Reporting
-`0%` coverage would be accurate but misleading: it implies coverage was
-measured and came up zero, when in fact it was never attempted. `null` is the
-honest value.
+## API & spec checks
 
-**When does mock mode trigger?**
+**OpenAPI / Swagger lint:** unsupported version; missing `info.title` / `info.version`; empty
+`paths`; unresolved local `$ref`; path template variables without a matching `in: path` parameter
+(and the reverse); path parameters not marked `required`; duplicate parameters and
+`operationId`s; missing `responses`; no 2xx/3xx response; invalid status codes; responses without a
+description; `requestBody` without content or schema; bodies on GET/HEAD/DELETE; undefined security
+schemes; `required` properties that are not defined; missing `servers`. Every issue carries a JSON
+pointer and, where possible, a line number.
 
-- `GROQ_API_KEY` is not set in the environment, or
-- The LLM API call fails for any reason (network, rate limit, API error)
+**GraphQL:** syntax errors and SDL/schema validation from `graphql-core` (unknown types, invalid
+root types and similar), with line and column.
 
-The application does not crash in either case. It falls back to the placeholder
-and clearly labels the result. This is intentional: the pipeline should always
-complete and return useful structural information even without a working LLM
-connection.
+**JSON / YAML:** syntax errors with line and column, duplicate keys (which most parsers silently
+drop), JSON Schema validation (Draft 4 to 2020-12), and meta-validation when the document is itself a
+JSON Schema.
 
----
-
-## Web UI
-
-The project ships a zero-build, zero-npm frontend served directly by FastAPI at
-`http://localhost:8000/ui/`.
-
-It is three tabs of plain HTML, CSS, and vanilla JavaScript — no React, no
-bundler, no build step required. The static files live in `backend/static/`
-and are mounted by FastAPI's `StaticFiles`.
-
-**Tab 1 — Python File:** Drag-and-drop (or click-to-browse) a `.py` file.
-Calls `POST /analyze`. Results render as expandable function cards with stats
-rows, a coverage progress bar, and a flags list.
-
-**Tab 2 — GitHub Repo:** Text input for the repo URL and a `max_files` number
-input. Calls `POST /analyze-repo`. Results show the response metadata
-(`python_files_found`, `files_selected`, `files_skipped_due_to_limit`,
-`files_analyzed`, `max_files`) as prominent summary chips above the per-file
-expandable cards. Mock-mode functions show a yellow `MOCK` badge and "Coverage:
-Not measured" — never "0%". LLM-mode functions show a blue `LLM` badge and
-a real coverage bar.
-
-**Tab 3 — API Spec:** Drag-and-drop an OpenAPI/Swagger or GraphQL SDL file,
-with an optional `base_url` field for live-server mode. Calls
-`POST /analyze-spec`. Results render as operation cards with color-coded
-HTTP method badges.
-
-All three tabs share a "Download full JSON report" button and display backend
-error messages (400 / 502 / network failure) as readable text, not raw JSON.
+**Live contract checks** (optional base URL): each operation is called with values taken from
+examples, defaults, enums or the schema. The checker verifies the returned status code is documented,
+validates the JSON response against the documented schema (with OpenAPI 3.0 `nullable` handled), and
+confirms that omitting required query parameters returns a 4xx. Write methods
+(POST/PUT/PATCH/DELETE) are sent only when you explicitly opt in. For GraphQL, the server's
+introspection result is compared with the SDL type by type and field by field.
 
 ---
 
-## Setup
+## Project layout
+
+```
+backend/
+  main.py            FastAPI app: pages, /auth, /api routes, security headers
+  config.py          settings from environment / backend/.env
+  auth.py            GitHub OAuth, server-side sessions, encrypted GitHub tokens
+  db.py              SQLAlchemy Core schema + queries (Supabase Postgres or SQLite)
+  jobs.py            background run execution + progress
+  gemini_client.py   Gemini REST client: strict model, retries, quota circuit breaker
+  languages.py       language detection + test framework per language
+  static_checks.py   compiler / linter diagnostics
+  sandbox.py         isolated subprocess execution (scrubbed env, rlimits, privilege drop)
+  executors.py       run generated tests and parse results (pytest, node, go, ruby, rust)
+  code_review.py     per-file pipeline: static → AI review → tests → triage
+  repo_analyzer.py   repository file selection + parallel analysis
+  github_api.py      GitHub REST client (repos, orgs, members, trees, blobs)
+  spec_parser.py     OpenAPI / GraphQL operation extraction
+  spec_checks.py     lint, validation, live contract checks, test generation for specs
+  spec_llm.py        prompts for API test generation
+  parser.py          Python AST fact extraction
+  dashboards.py      overview + team aggregations
+  test_*.py          pytest suite (network mocked; language runners are real)
+frontend/
+  index.html         sign-in page
+  app.html           application shell
+  assets/            CSS, ES-module views, icons (no build step)
+supabase/migrations/ database schema with Row Level Security
+examples/            sample specs and deliberately buggy files for demos
+Dockerfile, render.yaml
+```
+
+---
+
+## Configuration
+
+All settings are environment variables. For local development, copy `backend/.env.example` to
+`backend/.env`. That file is gitignored; never commit real keys.
+
+| Variable | Required | Description |
+|---|---|---|
+| `GEMINI_API_KEY` | yes (for AI) | Google AI Studio key. Used only by the server, sent in the `x-goog-api-key` header. |
+| `GEMINI_MODEL` | no | Defaults to `gemini-3.7-flash`. No other model is used as a fallback. |
+| `GEMINI_MAX_RETRIES` | no | Retries on 429/5xx with exponential backoff (default 4). |
+| `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | yes | GitHub OAuth App credentials. |
+| `SESSION_SECRET` | production | Random string; encrypts stored GitHub tokens. Auto-generated for local dev. |
+| `DATABASE_URL` | production | Supabase Postgres connection string. Empty = SQLite in `backend/data/`. |
+| `APP_BASE_URL` | yes | Public URL, e.g. `https://aitestgen.dev`. Builds the OAuth callback URL. |
+| `APP_ENV` | no | `production` enables HTTPS / `www` redirects, HSTS and secure cookies. |
+| `ALLOWED_HOSTS` | no | Comma-separated Host allowlist (TrustedHostMiddleware). |
+| `ALLOW_PRIVATE_TARGETS` | no | Allow live checks and spec URLs on localhost/private IPs. Default `true` in dev, `false` in production. |
+| `MAX_REPO_FILES` | no | Upper bound for files per repository run (default 25, max 100). |
+| `JOB_WORKERS` | no | Concurrent runs (default 3). |
+
+### Gemini quota
+
+The key's quota decides how much the tool can do. On the **Gemini API free tier,
+`gemini-3.7-flash` is limited to 20 requests per day per project**. One file uses one request, or
+two when its tests fail and need triage, so a single repository run can use the whole daily
+allowance. Enable billing on the Google AI project for real use.
+
+When the daily quota is exhausted, the client stops immediately (no pointless retries) and pauses
+AI calls for 15 minutes. Compiler/linter results and live contract checks still complete, and
+reports clearly mark the AI step as not run.
+
+---
+
+## Local development
+
+Prerequisites: Python 3.11+. Node.js, Go, Ruby, rustc, a JDK, gcc and PHP are optional; each one
+you install enables its checks and runners.
 
 ```bash
-# 1. Clone and enter the backend directory
-git clone https://github.com/<owner>/<repo>.git
-cd <repo>/backend
-
-# 2. Create and activate a virtual environment
-python -m venv venv
-source venv/bin/activate        # Windows: venv\Scripts\activate
-
-# 3. Install dependencies
+git clone https://github.com/TanishMhalsekar01/AI-test-generator.git
+cd AI-test-generator/backend
+python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-
-# 4. (Optional) Set environment variables
-export GROQ_API_KEY="gsk_..."   # Enables LLM test generation
-                                # Without this the app still runs in mock mode —
-                                # it will not crash or refuse requests
-export GITHUB_TOKEN="ghp_..."   # Raises GitHub API rate limit from 60 to 5000 req/h
-                                # Without this public repos work fine below the limit
-
-# 5. Start the server
+cp .env.example .env                                   # then fill in the values
 python -m uvicorn main:app --reload
 ```
 
-Then open:
-- **`http://localhost:8000/ui/`** — web interface
-- **`http://localhost:8000/docs`** — Swagger UI for the raw API
+Open http://localhost:8000 and sign in with GitHub. For local sign-in, create a separate OAuth App
+whose callback URL is `http://localhost:8000/auth/github/callback`.
 
----
-
-## Testing
+### Tests
 
 ```bash
 cd backend
 python -m pytest -q
 ```
 
-The suite currently has **104 tests** across three test files:
-
-| File | What it covers |
-|---|---|
-| `test_analyze_repo.py` | `parse_github_url`, `fetch_python_files` (mocked network), `POST /analyze-repo` — including new response shape, mock-mode fields, LLM-mode fields, cap behavior |
-| `test_analyze_spec.py` | `detect_spec_type`, `parse_openapi`, `parse_graphql`, `parse_spec`, `build_spec_user_prompt`, `generate_spec_tests` (mocked LLM), `POST /analyze-spec` |
-| `test_parser.py` | The core `parser.py` AST extraction logic |
-
-All network calls (GitHub API, Groq API) are mocked — no real API hits during
-`pytest`. CI runs automatically on every push and pull request to `main` via
-[GitHub Actions](.github/workflows/pytest.yml).
+177 tests cover auth and sessions, the Gemini client (retries, quota handling, key redaction),
+compiler and linter parsing, the real sandbox runners for every supported language, the review
+pipeline, repository selection, spec linting, live contract checks (HTTP mocked with `responses`),
+and history/team access control. Gemini and GitHub are always mocked, and the test suite never uses
+the key in `backend/.env`. CI runs the suite on every pull request
+([workflow](.github/workflows/pytest.yml)).
 
 ---
 
-## Known Limitations
+## GitHub OAuth App
 
-- **GitHub API rate limit:** Unauthenticated requests are capped at 60/hour.
-  Set `GITHUB_TOKEN` to raise this to 5,000/hour. Large repos with many files
-  hit this quickly.
-- **`max_files` cap:** `/analyze-repo` processes at most 200 files per request
-  (default 50). Files beyond the cap are skipped and counted in the response
-  metadata but not analysed.
-- **Python only:** The code parser and test runner support Python source files.
-  Other languages are out of scope for this build.
-- **No auth on endpoints:** The API has no authentication layer. It is intended
-  for local or trusted-network use during a hackathon demo.
->>>>>>> 349bef9 (Update AI test generator)
+1. GitHub → **Settings → Developer settings → OAuth Apps → New OAuth App**.
+2. Homepage URL: `https://aitestgen.dev`
+3. Authorization callback URL: `https://aitestgen.dev/auth/github/callback`
+4. Copy the **Client ID**, generate a **Client secret**, and set both as environment variables.
+
+The app requests `read:user`, `read:org` and `repo`. Those scopes are needed to list organizations
+and to analyze private repositories. If an organization restricts third-party OAuth apps, an
+organization owner must approve the app before its repositories and members appear on the team
+dashboard.
+
+## Supabase (database)
+
+1. Create a Supabase project.
+2. Apply the schema: open the **SQL editor** and run
+   [`supabase/migrations/20260928000000_init.sql`](supabase/migrations/20260928000000_init.sql),
+   or run `supabase db push` with the Supabase CLI.
+3. **Project Settings → Database → Connection string → Session pooler**. Copy the URI, fill in the
+   database password, and set it as `DATABASE_URL`. The session pooler works over IPv4, which Render
+   requires.
+
+Row Level Security is enabled on all tables with no policies. The public Supabase API
+(anon/authenticated keys) therefore cannot read sessions or reports; only the backend's direct
+database connection can.
+
+## Deployment on Render with the custom domain
+
+1. Push this repository to GitHub. In Render: **New → Blueprint** → select the repository.
+   [`render.yaml`](render.yaml) creates the Docker web service `ai-test-generator` with a health
+   check at `/healthz` and the domains `aitestgen.dev` and `www.aitestgen.dev`.
+2. Enter the secret environment variables in the Render dashboard: `GEMINI_API_KEY`,
+   `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `DATABASE_URL`. `SESSION_SECRET` is generated
+   automatically.
+3. **Register the domain** `aitestgen.dev` with any registrar if you have not already.
+4. **DNS**: in Render, open the service → **Settings → Custom Domains** and create the records it
+   shows at your DNS provider. At the time of writing these are:
+
+   | Host | Type | Value |
+   |---|---|---|
+   | `aitestgen.dev` (apex) | `A` (or `ALIAS`/`ANAME` → `ai-test-generator.onrender.com`) | `216.24.57.1` |
+   | `www` | `CNAME` | `ai-test-generator.onrender.com` |
+
+   Remove any conflicting `AAAA` records for the apex. Render issues TLS certificates automatically
+   once DNS resolves. `.dev` domains are HTTPS-only (HSTS preloaded), which this app expects.
+5. Update the GitHub OAuth App's callback URL to `https://aitestgen.dev/auth/github/callback`.
+
+Until DNS is live, set `APP_BASE_URL` to the `https://ai-test-generator.onrender.com` URL and use it
+in the OAuth App. In production, `www.aitestgen.dev` redirects to `aitestgen.dev` and HTTP redirects
+to HTTPS.
 
 ---
 
-## How IBM Bob Was Used
+## Security model
 
-IBM Bob was our primary development environment throughout this build. We used
-it as an active collaborator rather than a black box — scoping tasks precisely,
-reviewing every generated change, and manually verifying behavior at each stage.
-
-- **Scaffolding:** Bob generated the initial structure for our parser, FastAPI
-  backend, and test-runner from detailed, scoped prompts.
-- **Iterative debugging:** Bob's integrated terminal and agent chat were used
-  to diagnose real issues (environment setup, import errors, API integration
-  bugs) as they came up.
-- **Feature extension:** When we found our parser couldn't detect `try`/`except`
-  blocks, we used Bob to add that capability, then validated it ourselves with
-  targeted test cases before accepting the change.
-- **A real lesson learned:** In several cases, Bob's automated edits altered
-  code outside the requested scope (e.g. renaming a core function during an
-  unrelated refactor). We caught this by manually re-verifying behavior after
-  every change rather than assuming generated code was correct — a discipline
-  that caught multiple real bugs during development.
-- **Scope discipline at scale:** As the project grew (three endpoints, a spec
-  parser, a GitHub fetcher, a frontend, 104 tests), keeping each Bob task
-  tightly scoped with explicit "do not touch X" rules became increasingly
-  important. Tasks with loose scope produced changes that looked correct but
-  silently broke adjacent behavior.
-
-<<<<<<< HEAD
-Our workflow throughout: **scope a task precisely -> review the diff -> manually
-test actual behavior -> only then move forward.**
+- **Secrets stay on the server.** The Gemini key is read from the environment, sent only in a request
+  header, redacted from any error text, and never included in API responses. `backend/.env` is
+  gitignored.
+- **Sessions.** The browser holds only a random session id in an HttpOnly, SameSite=Lax cookie
+  (Secure in production). The database stores a SHA-256 of that id. The GitHub access token is
+  encrypted with Fernet using a key derived from `SESSION_SECRET`.
+- **Access control.** Every `/api/*` route requires a session. Users see their own runs, plus runs on
+  repositories owned by GitHub organizations they belong to (membership is checked live against
+  GitHub).
+- **Sandbox.** Submitted code and generated tests run in a temporary directory with a scrubbed
+  environment (no API keys, OAuth secrets or database URL), CPU, file-size and core-dump limits, and
+  a timeout that kills the whole process group. In the Docker image, each process also drops to the
+  unprivileged `sandbox` user, so it cannot read the server's environment or files. Network access
+  from the sandbox is not blocked, because live API tests need it. For hostile multi-tenant use, run
+  the service in its own isolated container or VM.
+- **SSRF guard.** In production, spec URLs and live-check base URLs that resolve to private,
+  loopback, link-local or reserved addresses are rejected.
+- **Browser hardening.** Strict Content-Security-Policy (no inline scripts or styles, no third-party
+  origins except GitHub avatars), `X-Frame-Options: DENY`, `nosniff`, HSTS in production. All
+  user-controlled and model-generated text is rendered with `textContent`, never as HTML.
 
 ---
 
-## Known Limitations / Future Work
+## HTTP API
 
-Scoped out deliberately for this build, listed here as an honest roadmap:
+All endpoints except sign-in and `/healthz` require the session cookie. Interactive docs are at
+`/api/docs`.
 
-- Multi-language support (currently Python only)
-- API/Swagger/GraphQL test generation module
-- GitHub repo ingestion / CI-CD integration
-- Team dashboards and multi-project history
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/auth/github/login` | Start GitHub sign-in |
+| GET | `/auth/github/callback` | OAuth callback |
+| POST | `/auth/logout` | End the session |
+| GET | `/api/me` | Signed-in user, model name, available runners |
+| POST | `/api/runs/code` | Multipart: `files[]` or `code` + `filename`; optional `project`, `run_tests` |
+| POST | `/api/runs/repo` | JSON: `{ "repo": "owner/name" \| URL, "branch"?: str, "max_files"?: int }` |
+| POST | `/api/runs/spec` | Multipart: `file` \| `spec_text` \| `spec_url`; optional `schema_file`, `base_url`, `allow_mutations`, `generate_tests` |
+| GET | `/api/runs` | History: `scope=mine\|all\|team:<org>`, `kind`, `project`, `limit`, `offset` |
+| GET / DELETE | `/api/runs/{id}` | Run with full report / delete your own run |
+| GET | `/api/github/repos`, `/api/github/orgs` | Live GitHub data for the signed-in user |
+| GET | `/api/dashboard/overview` | Per-project latest results and trends |
+| GET | `/api/dashboard/team/{org}` | Organization dashboard (members only) |
 
-## Setup
+The `POST /api/runs/*` endpoints return `202 {"id": ...}`; poll `GET /api/runs/{id}` until
+`status` is `completed` or `failed`.
 
-```bash
-cd backend
-pip install -r requirement.txt
-export GROQ_API_KEY="your_key_here"   # or set via $env: on Windows
-uvicorn main:app --reload
-```
+---
 
-Then POST a `.py` file to `http://localhost:8000/analyze`.
-=======
-Our workflow throughout: **scope a task precisely → review the diff → manually
-test actual behavior → only then move forward.**
->>>>>>> 349bef9 (Update AI test generator)
+## Claude Code tooling
+
+This repository ships project-level Claude Code configuration:
+
+- **Plugins** (declared in [`.claude/settings.json`](.claude/settings.json), from
+  `anthropics/claude-plugins-official`): **Supabase** (database/auth management via MCP),
+  **Playwright** (browser automation MCP), **Context7** (up-to-date library documentation), and
+  **frontend-design** (UI implementation skill).
+- **Playwright CLI** skill in `.claude/skills/playwright-cli/` (from `@playwright/cli`), for driving a
+  browser from the terminal.
+- **Strix** security-testing skill in `.claude/skills/strix-scan/`, with instructions for running
+  [Strix](https://github.com/usestrix/strix) against a local instance. Strix needs Docker and a
+  billed LLM key.
+- [`scripts/setup-dev-tools.sh`](scripts/setup-dev-tools.sh) installs all of the above on a
+  developer machine.
+
+---
+
+## Limitations
+
+- AI findings are model output: they are specific and line-referenced, but review them before
+  acting. Failing tests plus triage are the strongest evidence a defect is real.
+- Tests execute only for Python, JavaScript, Go, Ruby and Rust. Other languages get generated tests
+  to run locally.
+- Generated tests run against the single file under test. Code that depends on other project files
+  or third-party packages may need those dependencies, and such failures are triaged as
+  *sandbox limitation*.
+- Repository runs analyze up to `MAX_REPO_FILES` files per run (application code before tests).
+- The free Gemini tier (20 requests/day for `gemini-3.7-flash`) is only enough for a few files per
+  day.

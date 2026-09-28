@@ -5,8 +5,8 @@ Tests for:
   - spec_parser.parse_graphql
   - spec_parser.parse_spec
   - spec_llm.build_spec_user_prompt
-  - spec_llm.generate_spec_tests  (LLM API mocked)
-  - POST /analyze-spec  (FastAPI TestClient + all network mocked)
+  - spec_llm.generate_spec_tests  (Gemini mocked)
+  - POST /api/runs/spec  (signed-in TestClient, network mocked)
 
 Run with:
     cd backend
@@ -36,10 +36,8 @@ from spec_parser import (
 )
 from spec_llm import build_spec_user_prompt, generate_spec_tests
 
-from fastapi.testclient import TestClient
-from main import app  # noqa: E402
-
-client = TestClient(app)
+import gemini_client
+from conftest import gemini_response
 
 # ---------------------------------------------------------------------------
 # Fixtures / shared spec strings
@@ -446,15 +444,15 @@ class TestBuildSpecUserPrompt:
         assert "GET" in prompt
         assert "/pets" in prompt
 
-    def test_rest_prompt_mock_mode_by_default(self):
+    def test_rest_prompt_without_server_says_suite_runs_later(self):
         prompt = build_spec_user_prompt(self._rest_op())
-        assert "MOCK" in prompt
-        assert "responses" in prompt.lower()
+        assert "BASE_URL" in prompt
+        assert "No server is available" in prompt
 
-    def test_rest_prompt_live_mode_when_base_url_given(self):
+    def test_rest_prompt_with_base_url_targets_live_server(self):
         prompt = build_spec_user_prompt(self._rest_op(), base_url="http://localhost:8080")
-        assert "LIVE" in prompt
         assert "http://localhost:8080" in prompt
+        assert "BASE_URL" in prompt
 
     def test_graphql_prompt_contains_op_name(self):
         prompt = build_spec_user_prompt(self._graphql_op())
@@ -471,8 +469,9 @@ class TestBuildSpecUserPrompt:
         assert "400" in prompt
 
 
+
 # ---------------------------------------------------------------------------
-# generate_spec_tests  (LLM path mocked)
+# generate_spec_tests  (Gemini mocked)
 # ---------------------------------------------------------------------------
 
 class TestGenerateSpecTests:
@@ -488,253 +487,131 @@ class TestGenerateSpecTests:
             error_responses=[],
         )
 
-    def test_mock_fallback_when_no_api_key(self, monkeypatch):
-        monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    def test_no_api_key_raises_instead_of_placeholder(self, monkeypatch):
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        with pytest.raises(gemini_client.GeminiNotConfigured):
+            generate_spec_tests(self._simple_op())
+
+    def test_llm_success_path_adds_required_imports(self, mock_gemini):
+        mock_gemini("def test_health():\n    assert requests.get(BASE_URL + '/health', timeout=10).status_code == 200\n")
         code = generate_spec_tests(self._simple_op())
-        assert "def test_" in code
-
-    def test_mock_fallback_includes_placeholder(self, monkeypatch):
-        monkeypatch.delenv("GROQ_API_KEY", raising=False)
-        code = generate_spec_tests(self._simple_op())
-        assert "placeholder" in code
-
-    def test_live_mode_prompt_reflected_in_mock(self, monkeypatch):
-        monkeypatch.delenv("GROQ_API_KEY", raising=False)
-        code = generate_spec_tests(self._simple_op(), base_url="http://localhost:9000")
-        # The mock always returns placeholder regardless of mode — just check it runs
-        assert "def test_" in code
-
-    def test_llm_success_path(self, monkeypatch):
-        monkeypatch.setenv("GROQ_API_KEY", "fake-key")
-        fake_response = MagicMock()
-        fake_response.raise_for_status = MagicMock()
-        fake_response.json.return_value = {
-            "choices": [{"message": {"content": "def test_health():\n    pass\n"}}]
-        }
-        with patch("spec_llm._requests.post", return_value=fake_response):
-            code = generate_spec_tests(self._simple_op())
         assert "def test_health" in code
+        assert code.startswith("import os\nimport pytest\nimport requests")
 
-    def test_llm_failure_falls_back_to_mock(self, monkeypatch):
-        monkeypatch.setenv("GROQ_API_KEY", "fake-key")
-        with patch("spec_llm._requests.post", side_effect=ConnectionError("offline")):
-            code = generate_spec_tests(self._simple_op())
-        assert "def test_" in code
+    def test_llm_unavailable_raises(self, mock_gemini):
+        mock_gemini(gemini_response("", 503))
+        with pytest.raises(gemini_client.GeminiUnavailable):
+            generate_spec_tests(self._simple_op())
 
-    def test_llm_strips_markdown_fences(self, monkeypatch):
-        monkeypatch.setenv("GROQ_API_KEY", "fake-key")
-        fake_response = MagicMock()
-        fake_response.raise_for_status = MagicMock()
-        fenced = "```python\ndef test_foo():\n    pass\n```"
-        fake_response.json.return_value = {
-            "choices": [{"message": {"content": fenced}}]
-        }
-        with patch("spec_llm._requests.post", return_value=fake_response):
-            code = generate_spec_tests(self._simple_op())
+    def test_llm_strips_markdown_fences(self, mock_gemini):
+        mock_gemini("```python\nimport os\nimport pytest\nimport requests\ndef test_foo():\n    pass\n```")
+        code = generate_spec_tests(self._simple_op())
         assert "```" not in code
         assert "def test_foo" in code
 
 
 # ---------------------------------------------------------------------------
-# POST /analyze-spec  (FastAPI endpoint)
+# POST /api/runs/spec
 # ---------------------------------------------------------------------------
 
-def _make_llm_response(content: str) -> MagicMock:
-    """Build a minimal mock that looks like a successful LLM response."""
-    m = MagicMock()
-    m.raise_for_status = MagicMock()
-    m.json.return_value = {"choices": [{"message": {"content": content}}]}
-    return m
+GENERATED = "import os\nimport pytest\nimport requests\n\ndef test_placeholder_shape():\n    assert True\n"
 
 
-PLACEHOLDER_TEST = "import pytest\ndef test_placeholder():\n    pass\n"
+def _run(client, resp):
+    assert resp.status_code == 202, resp.text
+    return client.get(f"/api/runs/{resp.json()['id']}").json()
 
 
-class TestAnalyzeSpecEndpoint:
+class TestSpecRunEndpoint:
 
-    # ---- happy path: OpenAPI file upload ----
+    def test_openapi_upload_without_server_generates_but_does_not_execute(self, signed_in_client, mock_gemini):
+        mock_gemini(GENERATED)
+        run = _run(signed_in_client, signed_in_client.post(
+            "/api/runs/spec", files={"file": ("spec.json", io.BytesIO(MINIMAL_OPENAPI_JSON.encode()), "application/json")}))
+        assert run["status"] == "completed"
+        report = run["report"]
+        assert report["kind"] == "openapi"
+        assert len(report["operations"]) > 0
+        assert report["tests"][0]["code"]
+        # No server given: the suite is not run, so nothing can be reported as passing.
+        assert report["tests"][0]["execution"]["status"] == "not_executed"
+        assert run["summary"]["tests_passed"] == 0
 
-    def test_openapi_file_upload_returns_200(self, monkeypatch):
-        monkeypatch.delenv("GROQ_API_KEY", raising=False)
-        resp = client.post(
-            "/analyze-spec",
-            files={"file": ("spec.json", io.BytesIO(MINIMAL_OPENAPI_JSON.encode()), "application/json")},
-        )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["spec_type"] == "openapi"
-        assert data["operations_processed"] > 0
+    def test_graphql_upload(self, signed_in_client, mock_gemini):
+        mock_gemini(GENERATED)
+        run = _run(signed_in_client, signed_in_client.post(
+            "/api/runs/spec", files={"file": ("schema.graphql", io.BytesIO(MINIMAL_GRAPHQL_SDL.encode()), "text/plain")}))
+        report = run["report"]
+        assert report["kind"] == "graphql"
+        assert report["operations"][0]["gql_operation"] in {"query", "mutation"}
 
-    def test_openapi_response_shape(self, monkeypatch):
-        monkeypatch.delenv("GROQ_API_KEY", raising=False)
-        resp = client.post(
-            "/analyze-spec",
-            files={"file": ("spec.json", io.BytesIO(MINIMAL_OPENAPI_JSON.encode()), "application/json")},
-        )
-        data = resp.json()
-        assert "results" in data
-        assert "failed_operations" in data
-        assert "operations_skipped" in data
-        first = data["results"][0]
-        assert "operation" in first
-        assert "tests_generated" in first
-        assert "method" in first
-
-    # ---- happy path: GraphQL SDL file upload ----
-
-    def test_graphql_file_upload_returns_200(self, monkeypatch):
-        monkeypatch.delenv("GROQ_API_KEY", raising=False)
-        resp = client.post(
-            "/analyze-spec",
-            files={"file": ("schema.graphql", io.BytesIO(MINIMAL_GRAPHQL_SDL.encode()), "text/plain")},
-        )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["spec_type"] == "graphql"
-        assert data["operations_processed"] > 0
-
-    def test_graphql_response_has_gql_operation_field(self, monkeypatch):
-        monkeypatch.delenv("GROQ_API_KEY", raising=False)
-        resp = client.post(
-            "/analyze-spec",
-            files={"file": ("schema.graphql", io.BytesIO(MINIMAL_GRAPHQL_SDL.encode()), "text/plain")},
-        )
-        data = resp.json()
-        first = data["results"][0]
-        assert "gql_operation" in first
-
-    # ---- spec_url path ----
-
-    def test_spec_url_fetched_and_parsed(self, monkeypatch):
-        monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    def test_spec_url_fetched(self, signed_in_client, mock_gemini):
+        mock_gemini(GENERATED)
         mock_resp = MagicMock()
         mock_resp.raise_for_status = MagicMock()
         mock_resp.text = MINIMAL_OPENAPI_JSON
         with patch("main._http_requests.get", return_value=mock_resp):
-            resp = client.post(
-                "/analyze-spec",
-                data={"spec_url": "https://example.com/openapi.json"},
-            )
-        assert resp.status_code == 200
-        assert resp.json()["spec_type"] == "openapi"
+            run = _run(signed_in_client, signed_in_client.post("/api/runs/spec", data={"spec_url": "https://example.com/openapi.json"}))
+        assert run["report"]["kind"] == "openapi"
 
-    def test_invalid_spec_url_returns_400(self):
-        with patch("main._http_requests.get", side_effect=ConnectionError("unreachable")):
-            resp = client.post(
-                "/analyze-spec",
-                data={"spec_url": "https://example.com/bad.json"},
-            )
+    def test_unreachable_spec_url_returns_400(self, signed_in_client):
+        import requests as real_requests
+        with patch("main._http_requests.get", side_effect=real_requests.ConnectionError("unreachable")):
+            resp = signed_in_client.post("/api/runs/spec", data={"spec_url": "https://example.com/bad.json"})
         assert resp.status_code == 400
         assert "Could not fetch" in resp.json()["detail"]
 
-    # ---- no input ----
-
-    def test_no_file_no_url_returns_400(self):
-        resp = client.post("/analyze-spec")
-        assert resp.status_code == 400
-        assert "file upload" in resp.json()["detail"].lower() or "spec_url" in resp.json()["detail"]
-
-    # ---- malformed spec ----
-
-    def test_malformed_json_returns_400(self, monkeypatch):
-        monkeypatch.delenv("GROQ_API_KEY", raising=False)
-        bad = b'{"openapi": "3.0.0", "paths": {invalid}}'
-        resp = client.post(
-            "/analyze-spec",
-            files={"file": ("spec.json", io.BytesIO(bad), "application/json")},
-        )
+    def test_no_input_returns_400(self, signed_in_client):
+        resp = signed_in_client.post("/api/runs/spec")
         assert resp.status_code == 400
 
-    def test_unrecognised_spec_returns_400(self, monkeypatch):
-        monkeypatch.delenv("GROQ_API_KEY", raising=False)
-        resp = client.post(
-            "/analyze-spec",
-            files={"file": ("file.txt", io.BytesIO(b"Hello world"), "text/plain")},
-        )
+    def test_malformed_json_reports_syntax_error_with_line(self, signed_in_client):
+        run = _run(signed_in_client, signed_in_client.post(
+            "/api/runs/spec", files={"file": ("spec.json", io.BytesIO(MALFORMED_JSON.encode()), "application/json")}))
+        issue = run["report"]["issues"][0]
+        assert issue["rule"] == "json-syntax" and issue["line"] == 1
+
+    def test_unrecognised_text_returns_400(self, signed_in_client):
+        resp = signed_in_client.post("/api/runs/spec", files={"file": ("file.txt", io.BytesIO(NOT_A_SPEC.encode()), "text/plain")})
         assert resp.status_code == 400
 
-    # ---- empty spec ----
+    def test_empty_openapi_is_linted(self, signed_in_client):
+        run = _run(signed_in_client, signed_in_client.post(
+            "/api/runs/spec", files={"file": ("spec.json", io.BytesIO(EMPTY_OPENAPI.encode()), "application/json")},
+            data={"generate_tests": "false"}))
+        rules = {i["rule"] for i in run["report"]["issues"]}
+        assert {"paths-empty", "info-title-missing", "info-version-missing"} <= rules
 
-    def test_empty_spec_returns_400(self, monkeypatch):
-        monkeypatch.delenv("GROQ_API_KEY", raising=False)
-        resp = client.post(
-            "/analyze-spec",
-            files={"file": ("spec.json", io.BytesIO(EMPTY_OPENAPI.encode()), "application/json")},
-        )
-        assert resp.status_code == 400
-        assert "no endpoint" in resp.json()["detail"].lower()
-
-    # ---- oversized spec (cap triggered) ----
-
-    def test_oversized_spec_processes_cap_and_reports_skipped(self, monkeypatch):
-        monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    def test_oversized_spec_reports_skipped(self, signed_in_client):
         big_spec = _make_big_openapi(MAX_OPERATIONS + 3).encode()
-        resp = client.post(
-            "/analyze-spec",
-            files={"file": ("big.json", io.BytesIO(big_spec), "application/json")},
-        )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["operations_skipped"] == 3
-        assert data["operations_processed"] == MAX_OPERATIONS
-        assert "warning" in data
+        run = _run(signed_in_client, signed_in_client.post(
+            "/api/runs/spec", files={"file": ("big.json", io.BytesIO(big_spec), "application/json")},
+            data={"generate_tests": "false"}))
+        assert run["report"]["operations_skipped"] == 3
+        assert len(run["report"]["operations"]) == MAX_OPERATIONS
 
-    # ---- LLM failure for one operation: skip and report ----
+    def test_ai_unavailable_is_reported_not_faked(self, signed_in_client, mock_gemini):
+        mock_gemini(gemini_response("", 503))
+        run = _run(signed_in_client, signed_in_client.post(
+            "/api/runs/spec", files={"file": ("spec.json", io.BytesIO(MINIMAL_OPENAPI_JSON.encode()), "application/json")}))
+        assert run["status"] == "completed"
+        assert "unavailable" in run["report"]["ai"]["error"]
+        assert run["summary"]["tests_generated"] == 0
 
-    def test_llm_failure_skipped_and_reported(self, monkeypatch):
-        monkeypatch.setenv("GROQ_API_KEY", "fake-key")
-        # Make the LLM always raise an exception
-        with patch("main.generate_spec_tests", side_effect=RuntimeError("LLM down")):
-            resp = client.post(
-                "/analyze-spec",
-                files={"file": ("spec.json", io.BytesIO(MINIMAL_OPENAPI_JSON.encode()), "application/json")},
-            )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert len(data["failed_operations"]) > 0
-        assert data["operations_processed"] == 0
+    def test_json_data_validated_against_schema(self, signed_in_client):
+        schema = json.dumps({"type": "object", "required": ["id"], "properties": {"id": {"type": "integer"}}})
+        run = _run(signed_in_client, signed_in_client.post(
+            "/api/runs/spec",
+            files={"file": ("data.json", io.BytesIO(NOT_API_JSON.encode()), "application/json"),
+                   "schema_file": ("schema.json", io.BytesIO(schema.encode()), "application/json")}))
+        assert run["report"]["kind"] == "json"
+        assert run["report"]["schema_validation"]["valid"] is False
+        assert any(i["rule"] == "schema-required" for i in run["report"]["issues"])
 
-    # ---- mock mode: no base_url ----
-
-    def test_mock_mode_no_base_url(self, monkeypatch):
-        monkeypatch.delenv("GROQ_API_KEY", raising=False)
-        resp = client.post(
-            "/analyze-spec",
-            files={"file": ("spec.json", io.BytesIO(MINIMAL_OPENAPI_JSON.encode()), "application/json")},
-        )
-        assert resp.status_code == 200
-        # In mock mode all operations should be processed without a real server
-        data = resp.json()
-        assert data["operations_processed"] > 0
-
-    # ---- live base_url mode ----
-
-    def test_live_base_url_mode(self, monkeypatch):
-        monkeypatch.setenv("GROQ_API_KEY", "fake-key")
-        fake_llm = MagicMock()
-        fake_llm.raise_for_status = MagicMock()
-        fake_llm.json.return_value = {
-            "choices": [{"message": {"content": PLACEHOLDER_TEST}}]
-        }
-        with patch("spec_llm._requests.post", return_value=fake_llm):
-            resp = client.post(
-                "/analyze-spec",
-                files={"file": ("spec.json", io.BytesIO(MINIMAL_OPENAPI_JSON.encode()), "application/json")},
-                data={"base_url": "http://localhost:8080"},
-            )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["operations_processed"] > 0
-
-    # ---- existing /analyze endpoint must still work ----
-
-    def test_existing_analyze_endpoint_unaffected(self):
-        simple_py = b"def hello():\n    return 'hello'\n"
-        resp = client.post(
-            "/analyze",
-            files={"file": ("sample.py", io.BytesIO(simple_py), "text/plain")},
-        )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert isinstance(data, list)
-        assert data[0]["name"] == "hello"
+    def test_private_base_url_blocked_when_not_allowed(self, signed_in_client, monkeypatch):
+        monkeypatch.setenv("ALLOW_PRIVATE_TARGETS", "false")
+        resp = signed_in_client.post(
+            "/api/runs/spec", files={"file": ("spec.json", io.BytesIO(MINIMAL_OPENAPI_JSON.encode()), "application/json")},
+            data={"base_url": "http://127.0.0.1:8080"})
+        assert resp.status_code == 400
+        assert "private" in resp.json()["detail"]

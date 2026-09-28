@@ -1,328 +1,389 @@
 """
-Stage 1 — Upload
-FastAPI app that accepts a .py file upload and returns parsed function metadata.
+AI Test Generator — FastAPI application.
+
+Pages
+  GET  /                 sign-in page (redirects to /app when signed in)
+  GET  /app              application (redirects to / when signed out)
+Auth
+  GET  /auth/github/login, /auth/github/callback;  POST /auth/logout
+API (all require a GitHub session)
+  GET  /api/me
+  POST /api/runs/code    review uploaded / pasted source files (any language)
+  POST /api/runs/repo    review a GitHub repository at a pinned commit
+  POST /api/runs/spec    check OpenAPI / GraphQL / JSON documents
+  GET  /api/runs, GET/DELETE /api/runs/{id}
+  GET  /api/github/repos, /api/github/orgs
+  GET  /api/dashboard/overview, /api/dashboard/team/{org}
 """
 
-import os
+from contextlib import asynccontextmanager
 from pathlib import Path
-
-# Load .env from the backend directory so GROQ_API_KEY is available
-_ENV_FILE = Path(__file__).parent / ".env"
-if _ENV_FILE.exists():
-    for _line in _ENV_FILE.read_text().splitlines():
-        _line = _line.strip()
-        if _line and not _line.startswith("#") and "=" in _line:
-            _k, _v = _line.split("=", 1)
-            os.environ.setdefault(_k.strip(), _v.strip())
-
-from fastapi import FastAPI, UploadFile, HTTPException, Form
-from fastapi.responses import JSONResponse, RedirectResponse
-from fastapi.staticfiles import StaticFiles
 from typing import Optional
-from pydantic import BaseModel
 
 import requests as _http_requests
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from parser import parse_source
-from llm import generate_tests
-from runner import run_generated_tests
-from spec_parser import parse_spec
-from spec_llm import generate_spec_tests
-from github_fetcher import fetch_python_files
+import auth
+import code_review
+import dashboards
+import db
+import executors
+import jobs
+import repo_analyzer
+import spec_checks
+from auth import CurrentUser, current_user, optional_user
+from config import FRONTEND_DIR, get_settings
+from github_api import GitHubAuthError, GitHubClient, GitHubError, parse_repo_ref, user_org_logins
 
-# Resolve frontend dir relative to this file so it works regardless of
-# which directory uvicorn is launched from.
-_FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
+MAX_UPLOAD_FILES = 10
+MAX_FILE_BYTES = 300_000
+MAX_SPEC_BYTES = 5_000_000
 
-app = FastAPI(title="AI Unit-Test Generator — Stage 1/2 (Upload + Parse)")
-app.mount("/ui", StaticFiles(directory=str(_FRONTEND_DIR), html=True), name="ui")
 
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    db.init_db()
+    db.mark_interrupted_runs()
+    db.purge_expired_sessions()
+    yield
+
+
+settings = get_settings()
+app = FastAPI(title="AI Test Generator", docs_url="/api/docs", redoc_url=None, openapi_url="/api/openapi.json",
+              lifespan=lifespan)
+if settings.allowed_hosts:
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(settings.allowed_hosts))
+
+_CSP = (
+    "default-src 'self'; img-src 'self' data: https://avatars.githubusercontent.com; "
+    "style-src 'self'; script-src 'self'; connect-src 'self'; font-src 'self'; "
+    "frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+)
+
+
+@app.middleware("http")
+async def edge_policies(request: Request, call_next):
+    s = get_settings()
+    path = request.url.path
+    if s.is_production and path != "/healthz":
+        host = request.headers.get("host", "").split(":")[0]
+        # www.<domain> -> <domain>; other hosts (e.g. *.onrender.com) keep working before DNS is live.
+        wrong_host = bool(s.canonical_host) and host == f"www.{s.canonical_host}"
+        if request.url.scheme != "https" or wrong_host:
+            target = f"https://{s.canonical_host}{path}" + (f"?{request.url.query}" if request.url.query else "")
+            return RedirectResponse(target, status_code=301)
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    if not path.startswith("/api/docs"):
+        response.headers.setdefault("Content-Security-Policy", _CSP)
+    if s.is_production:
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    if path.startswith("/api/"):
+        response.headers.setdefault("Cache-Control", "no-store")
+    return response
+
+
+app.include_router(auth.router)
+app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIR / "assets")), name="assets")
+
+
+@app.exception_handler(GitHubError)
+async def _github_error(request: Request, exc: GitHubError):
+    response = JSONResponse(status_code=exc.status, content={"detail": str(exc)})
+    if isinstance(exc, GitHubAuthError):
+        # The stored GitHub token was revoked or expired: end the session so the
+        # browser returns to sign-in instead of bouncing between / and /app.
+        raw = request.cookies.get(auth.SESSION_COOKIE)
+        if raw:
+            db.delete_session(auth.hash_session_id(raw))
+        response.delete_cookie(auth.SESSION_COOKIE, path="/")
+    return response
+
+
+# ---------------------------------------------------------------------------
+# Pages
+# ---------------------------------------------------------------------------
 
 @app.get("/", include_in_schema=False)
-async def root_redirect():
-    return RedirectResponse(url="/ui/")
+def index(request: Request):
+    if optional_user(request):
+        return RedirectResponse("/app", status_code=303)
+    return FileResponse(FRONTEND_DIR / "index.html")
 
 
-@app.post("/analyze")
-async def analyze(file: UploadFile) -> JSONResponse:
-    """
-    Accept a single .py file, parse it for function metadata, and return the
-    extracted information as JSON.
+@app.get("/app", include_in_schema=False)
+def application(request: Request):
+    if not optional_user(request):
+        return RedirectResponse("/", status_code=303)
+    return FileResponse(FRONTEND_DIR / "app.html")
 
-    Stage 3 (LLM test generation) will plug in here once it is ready.
-    """
-    if not file.filename or not file.filename.endswith(".py"):
-        raise HTTPException(status_code=400, detail="Only .py files are accepted.")
 
-    raw_bytes = await file.read()
-    try:
-        source = raw_bytes.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail="File could not be decoded as UTF-8."
-        ) from exc
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    return FileResponse(FRONTEND_DIR / "assets" / "favicon.svg", media_type="image/svg+xml")
 
-    functions = parse_source(source)
 
-    payload = []
-    for fn in functions:
-        test_code = generate_tests(fn, module_import_name="target")
-        report = run_generated_tests(
-            target_source=fn.source,
-            test_source=test_code,
-            module_name="target",
-        )
-        payload.append(
-            {
-                "name": fn.name,
-                "signature": fn.signature,
-                "docstring": fn.docstring,
-                "conditions": fn.conditions,
-                "raises": fn.raises,
-                "returns": fn.returns,
-                "logic_summary": fn.logic_summary(),
-                "flags": fn.flags,
-                # NOTE: `source` is intentionally excluded from the API response;
-                # it is kept in FunctionInfo for later test execution only.
-                "tests_generated": report["tests_generated"],
-                "tests_passed": report["tests_passed"],
-                "tests_failed": report["tests_failed"],
-                "coverage_percent": report["coverage_percent"],
-            }
-        )
-
-    return JSONResponse(content=payload)
+@app.get("/healthz", include_in_schema=False)
+def healthz():
+    return {"status": "ok"}
 
 
 # ---------------------------------------------------------------------------
-# POST /analyze-repo
+# Session info
 # ---------------------------------------------------------------------------
 
-class AnalyzeRepoRequest(BaseModel):
-    github_url: str
-    max_files: int = 50
-
-
-# Sentinel comment left by _mock_generate() — used to detect mock mode below.
-_MOCK_SENTINEL = "_placeholder"
-
-
-@app.post("/analyze-repo")
-async def analyze_repo(body: AnalyzeRepoRequest) -> JSONResponse:
-    """
-    Fetch every .py file from a public GitHub repository (up to max_files),
-    run each one through the same Parse → LLM Generate → Run + Report pipeline
-    used by POST /analyze, and return a structured report object.
-    """
-    # --- Validate max_files ---
-    if body.max_files < 1 or body.max_files > 200:
-        raise HTTPException(
-            status_code=400,
-            detail="max_files must be between 1 and 200.",
-        )
-
-    # --- Fetch files from GitHub (URL validation happens inside fetch_python_files) ---
-    try:
-        files, python_files_found = fetch_python_files(
-            body.github_url, max_files=body.max_files, _return_total=True
-        )
-    except ValueError as exc:
-        # Invalid URL format — client error
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
-        # GitHub API errors, network failures, rate limits, etc. — upstream error
-        raise HTTPException(
-            status_code=502,
-            detail=f"Failed to fetch repository from GitHub: {exc}",
-        ) from exc
-
-    files_selected = len(files)
-    files_skipped_due_to_limit = max(0, python_files_found - body.max_files)
-
-    # --- Run pipeline per file ---
-    results = []
-    files_analyzed = 0
-    for gh_file in files:
-        # Parse — catch syntax errors so one bad file doesn't abort the whole request
-        try:
-            functions = parse_source(gh_file.source)
-        except Exception as exc:
-            print(f"[analyze-repo] parse failed for {gh_file.path!r}: {exc}")
-            results.append({"file": gh_file.path, "functions": [], "parse_error": str(exc)})
-            continue
-
-        fn_results = []
-        for fn in functions:
-            test_code = generate_tests(fn, module_import_name="target")
-            is_mock = _MOCK_SENTINEL in test_code
-
-            report = run_generated_tests(
-                target_source=fn.source,
-                test_source=test_code,
-                module_name="target",
-            )
-
-            if is_mock:
-                # Mock/placeholder tests never exercise the real target code —
-                # coverage measurement is meaningless here.
-                fn_entry = {
-                    "name": fn.name,
-                    "signature": fn.signature,
-                    "docstring": fn.docstring,
-                    "conditions": fn.conditions,
-                    "raises": fn.raises,
-                    "returns": fn.returns,
-                    "logic_summary": fn.logic_summary(),
-                    "flags": fn.flags,
-                    # NOTE: source excluded from response, same as /analyze
-                    "tests_generated": report["tests_generated"],
-                    "tests_passed": report["tests_passed"],
-                    "tests_failed": report["tests_failed"],
-                    "coverage_percent": None,
-                    "generation_mode": "mock",
-                    "coverage_status": "not_measured",
-                    "warning": (
-                        "No GROQ_API_KEY set or LLM call failed — placeholder test used. "
-                        "coverage_percent is null because no target code was executed."
-                    ),
-                }
-            else:
-                fn_entry = {
-                    "name": fn.name,
-                    "signature": fn.signature,
-                    "docstring": fn.docstring,
-                    "conditions": fn.conditions,
-                    "raises": fn.raises,
-                    "returns": fn.returns,
-                    "logic_summary": fn.logic_summary(),
-                    "flags": fn.flags,
-                    # NOTE: source excluded from response, same as /analyze
-                    "tests_generated": report["tests_generated"],
-                    "tests_passed": report["tests_passed"],
-                    "tests_failed": report["tests_failed"],
-                    "coverage_percent": report["coverage_percent"],
-                    "generation_mode": "llm",
-                    "coverage_status": "measured",
-                    "warning": None,
-                }
-
-            fn_results.append(fn_entry)
-
-        files_analyzed += 1
-        results.append({"file": gh_file.path, "functions": fn_results})
-
-    return JSONResponse(content={
-        "max_files": body.max_files,
-        "python_files_found": python_files_found,
-        "files_selected": files_selected,
-        "files_skipped_due_to_limit": files_skipped_due_to_limit,
-        "files_analyzed": files_analyzed,
-        "results": results,
-    })
-
-
-# ---------------------------------------------------------------------------
-# POST /analyze-spec
-# ---------------------------------------------------------------------------
-
-@app.post("/analyze-spec")
-async def analyze_spec(
-    file: Optional[UploadFile] = None,
-    spec_url: Optional[str] = Form(default=None),
-    base_url: Optional[str] = Form(default=None),
-) -> JSONResponse:
-    """
-    Accept an OpenAPI/Swagger (JSON or YAML) or GraphQL SDL spec — either as
-    an uploaded file or a publicly reachable URL — and return generated pytest
-    tests plus run results for every endpoint / operation found.
-    """
-    # --- 1. Obtain raw spec text ---
-    raw: str = ""
-
-    if file is not None:
-        raw_bytes = await file.read()
-        try:
-            raw = raw_bytes.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise HTTPException(
-                status_code=400,
-                detail="Uploaded file could not be decoded as UTF-8.",
-            ) from exc
-    elif spec_url:
-        try:
-            resp = _http_requests.get(spec_url.strip(), timeout=15)
-            resp.raise_for_status()
-            raw = resp.text
-        except Exception as exc:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Could not fetch spec from URL: {exc}",
-            ) from exc
-    else:
-        raise HTTPException(
-            status_code=400,
-            detail="Provide either a file upload or a 'spec_url' form field.",
-        )
-
-    # --- 2. Parse the spec ---
-    skipped_count = 0
-    try:
-        operations, spec_type, skipped_count = parse_spec(raw)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    live_base_url: str = (base_url or "").strip()
-
-    # --- 3. Generate + run tests per operation ---
-    payload = []
-    failed_operations = []
-
-    for op in operations:
-        try:
-            test_code = generate_spec_tests(op, base_url=live_base_url)
-        except Exception as exc:
-            print(f"[analyze-spec] LLM generation failed for {op.name!r}: {exc}")
-            failed_operations.append({"operation": op.name, "reason": str(exc)})
-            continue
-
-        # Run in an isolated temp dir — reuse the existing runner
-        report = run_generated_tests(
-            target_source="# spec target placeholder\n",
-            test_source=test_code,
-            module_name="target",
-        )
-
-        entry: dict = {
-            "operation": op.name,
-            "spec_type": spec_type,
-            "summary": op.summary,
-            "logic_summary": op.logic_summary(),
-            "tests_generated": report["tests_generated"],
-            "tests_passed": report["tests_passed"],
-            "tests_failed": report["tests_failed"],
-            "coverage_percent": report["coverage_percent"],
-        }
-        if op.op_type == "rest":
-            entry["method"] = op.method
-            entry["path"] = op.path
-        else:
-            entry["gql_operation"] = op.gql_operation
-            entry["return_type"] = op.return_type
-
-        payload.append(entry)
-
-    response_body: dict = {
-        "spec_type": spec_type,
-        "operations_processed": len(payload),
-        "operations_skipped": skipped_count,
-        "failed_operations": failed_operations,
-        "results": payload,
+@app.get("/api/me")
+def me(user: CurrentUser = Depends(current_user)):
+    s = get_settings()
+    return {
+        "login": user.login,
+        "name": user.name,
+        "avatar_url": user.avatar_url,
+        "model": s.gemini_model,
+        "ai_configured": s.ai_configured,
+        "runners": executors.available_runners(),
+        "limits": {"upload_files": MAX_UPLOAD_FILES, "file_bytes": MAX_FILE_BYTES, "repo_files": s.max_repo_files},
     }
-    if skipped_count:
-        response_body["warning"] = (
-            f"{skipped_count} operation(s) were skipped because the spec exceeds "
-            f"the {50}-operation cap. Trim the spec to process all operations."
-        )
 
-    return JSONResponse(content=response_body)
+
+# ---------------------------------------------------------------------------
+# Runs
+# ---------------------------------------------------------------------------
+
+def _decode(data: bytes, name: str) -> str:
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"{name} is not UTF-8 text.") from exc
+
+
+@app.post("/api/runs/code", status_code=202)
+async def create_code_run(
+    user: CurrentUser = Depends(current_user),
+    files: list[UploadFile] = File(default=[]),
+    code: str = Form(default=""),
+    filename: str = Form(default=""),
+    project: str = Form(default=""),
+    run_tests: bool = Form(default=True),
+):
+    sources: list[tuple[str, str]] = []
+    for upload in files:
+        if not upload.filename:
+            continue
+        data = await upload.read()
+        if len(data) > MAX_FILE_BYTES:
+            raise HTTPException(status_code=413, detail=f"{upload.filename} is larger than {MAX_FILE_BYTES // 1000} KB.")
+        sources.append((Path(upload.filename).name, _decode(data, upload.filename)))
+    if code.strip():
+        if len(code.encode()) > MAX_FILE_BYTES:
+            raise HTTPException(status_code=413, detail=f"Pasted code is larger than {MAX_FILE_BYTES // 1000} KB.")
+        sources.append((Path(filename.strip() or "snippet.txt").name, code))
+    if not sources:
+        raise HTTPException(status_code=400, detail="Upload at least one source file or paste code.")
+    if len(sources) > MAX_UPLOAD_FILES:
+        raise HTTPException(status_code=400, detail=f"At most {MAX_UPLOAD_FILES} files per run.")
+
+    s = get_settings()
+    run_id = db.create_run(user_id=user.id, user_login=user.login, kind="code",
+                           project=project.strip() or sources[0][0], model=s.gemini_model)
+
+    def job(progress):
+        reports = []
+        for i, (name, text) in enumerate(sources):
+            base = 5 + int(90 * i / len(sources))
+            reports.append(code_review.review_file(name, text, run_tests=run_tests,
+                                                   progress=lambda msg, b=base: progress(b, msg)))
+        summary = code_review.summarize(reports)
+        return {"files": reports}, summary, {"languages": ",".join(repo_analyzer.languages_of(reports))}
+
+    jobs.submit(run_id, job)
+    return {"id": run_id}
+
+
+class RepoRunRequest(BaseModel):
+    repo: str
+    branch: Optional[str] = None
+    max_files: Optional[int] = None
+
+
+@app.post("/api/runs/repo", status_code=202)
+def create_repo_run(body: RepoRunRequest, user: CurrentUser = Depends(current_user)):
+    s = get_settings()
+    try:
+        owner, name, url_branch = parse_repo_ref(body.repo)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    max_files = min(20, s.max_repo_files) if body.max_files is None else body.max_files
+    if not 1 <= max_files <= s.max_repo_files:
+        raise HTTPException(status_code=400, detail=f"max_files must be between 1 and {s.max_repo_files}.")
+
+    client = GitHubClient(user.github_token)
+    info = client.repo(owner, name)  # 404 if the user cannot see it
+    branch = (body.branch or url_branch or info["default_branch"]).strip()
+    sha = client.commit_sha(info["owner"]["login"], info["name"], branch)
+    full_name = info["full_name"]
+    run_id = db.create_run(user_id=user.id, user_login=user.login, kind="repo", project=full_name,
+                           owner=info["owner"]["login"], ref=branch, commit_sha=sha, model=s.gemini_model)
+
+    def job(progress):
+        report, summary = repo_analyzer.analyze_repository(
+            client, info["owner"]["login"], info["name"], sha, max_files, progress)
+        report["branch"] = branch
+        report["html_url"] = info.get("html_url")
+        return report, summary, {"languages": ",".join(repo_analyzer.languages_of(report["files"]))}
+
+    jobs.submit(run_id, job)
+    return {"id": run_id}
+
+
+@app.post("/api/runs/spec", status_code=202)
+async def create_spec_run(
+    user: CurrentUser = Depends(current_user),
+    file: Optional[UploadFile] = File(default=None),
+    spec_text: str = Form(default=""),
+    spec_url: str = Form(default=""),
+    schema_file: Optional[UploadFile] = File(default=None),
+    base_url: str = Form(default=""),
+    allow_mutations: bool = Form(default=False),
+    generate_tests: bool = Form(default=True),
+    project: str = Form(default=""),
+):
+    filename = ""
+    if file is not None and file.filename:
+        data = await file.read()
+        if len(data) > MAX_SPEC_BYTES:
+            raise HTTPException(status_code=413, detail="Spec file is larger than 5 MB.")
+        raw, filename = _decode(data, file.filename), Path(file.filename).name
+    elif spec_text.strip():
+        raw, filename = spec_text, "pasted"
+    elif spec_url.strip():
+        try:
+            url = await run_in_threadpool(spec_checks.guard_url, spec_url)
+            resp = await run_in_threadpool(_http_requests.get, url, timeout=15, allow_redirects=False)
+            resp.raise_for_status()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except _http_requests.RequestException as exc:
+            raise HTTPException(status_code=400, detail=f"Could not fetch the spec URL ({type(exc).__name__}).") from exc
+        raw, filename = resp.text, Path(url.split("?")[0]).name or "spec"
+    else:
+        raise HTTPException(status_code=400, detail="Provide a spec file, pasted text, or a spec URL.")
+
+    schema_raw = None
+    if schema_file is not None and schema_file.filename:
+        schema_raw = _decode(await schema_file.read(), schema_file.filename)
+
+    base = base_url.strip()
+    if base:
+        try:
+            base = await run_in_threadpool(spec_checks.guard_url, base)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # Fail fast on unrecognised documents instead of creating a run that can only fail.
+    try:
+        kind, _, _ = spec_checks.detect_kind(raw, filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    s = get_settings()
+    run_id = db.create_run(user_id=user.id, user_login=user.login, kind="spec",
+                           project=project.strip() or filename or kind, model=s.gemini_model)
+
+    def job(progress):
+        report, summary = spec_checks.analyze_spec(
+            raw, filename, schema_raw=schema_raw, base_url=base, allow_mutations=allow_mutations,
+            generate_tests=generate_tests, progress=progress)
+        return report, summary, {"languages": report["kind"]}
+
+    jobs.submit(run_id, job)
+    return {"id": run_id}
+
+
+def _visible_owners(user: CurrentUser) -> list[str]:
+    try:
+        return user_org_logins(user.github_token)
+    except GitHubError:
+        return []
+
+
+@app.get("/api/runs")
+def list_runs(
+    user: CurrentUser = Depends(current_user),
+    scope: str = Query(default="mine"),
+    kind: Optional[str] = None,
+    project: Optional[str] = None,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
+    if scope == "mine":
+        rows = db.list_runs(user_id=user.id, kind=kind, project=project, limit=limit, offset=offset)
+    elif scope.startswith("team:"):
+        org = scope.split(":", 1)[1]
+        if org not in _visible_owners(user):
+            raise HTTPException(status_code=403, detail=f"You are not a member of {org}.")
+        rows = db.list_runs(owners=[org], kind=kind, project=project, limit=limit, offset=offset)
+    elif scope == "all":
+        rows = db.list_runs(user_id=user.id, owners=_visible_owners(user), kind=kind, project=project,
+                            limit=limit, offset=offset)
+    else:
+        raise HTTPException(status_code=400, detail="scope must be mine, all, or team:<org>.")
+    return {"runs": [{**db.serialize_run(r), "headline": dashboards.headline(r["kind"], r.get("summary"))}
+                     for r in rows]}
+
+
+def _load_visible_run(run_id: str, user: CurrentUser) -> dict:
+    row = db.get_run(run_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Run not found.")
+    if row["user_id"] != user.id and not (row.get("owner") and row["owner"] in _visible_owners(user)):
+        raise HTTPException(status_code=404, detail="Run not found.")
+    return row
+
+
+@app.get("/api/runs/{run_id}")
+def get_run(run_id: str, user: CurrentUser = Depends(current_user)):
+    row = _load_visible_run(run_id, user)
+    include = row["status"] in {"completed", "failed"}
+    return {**db.serialize_run(row, include_report=include), "is_mine": row["user_id"] == user.id}
+
+
+@app.delete("/api/runs/{run_id}", status_code=204)
+def delete_run(run_id: str, user: CurrentUser = Depends(current_user)):
+    if not db.delete_run(run_id, user.id):
+        raise HTTPException(status_code=404, detail="Run not found.")
+
+
+# ---------------------------------------------------------------------------
+# GitHub data + dashboards
+# ---------------------------------------------------------------------------
+
+@app.get("/api/github/repos")
+def github_repos(user: CurrentUser = Depends(current_user)):
+    return {"repos": GitHubClient(user.github_token).repos()}
+
+
+@app.get("/api/github/orgs")
+def github_orgs(user: CurrentUser = Depends(current_user)):
+    return {"orgs": GitHubClient(user.github_token).orgs()}
+
+
+@app.get("/api/dashboard/overview")
+def dashboard_overview(user: CurrentUser = Depends(current_user)):
+    return dashboards.overview(user.id)
+
+
+@app.get("/api/dashboard/team/{org}")
+def dashboard_team(org: str, user: CurrentUser = Depends(current_user)):
+    if org not in _visible_owners(user):
+        raise HTTPException(status_code=403, detail=f"You are not a member of {org}, or the app has not been "
+                                                    "granted access to it on GitHub.")
+    return dashboards.team(GitHubClient(user.github_token), org)

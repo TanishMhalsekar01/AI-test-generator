@@ -1,44 +1,29 @@
 """
-Spec LLM — test generation for API specs.
-Reuses the existing Groq API call infrastructure from llm.py but builds prompts
-from OperationInfo (parsed spec facts) instead of FunctionInfo (AST facts).
+Spec LLM — pytest generation for API operations (OpenAPI/Swagger or GraphQL).
 
-For each operation it generates:
-  - A happy-path test (valid params, expect declared success code)
-  - A missing-required-param test (expect 400/422)
-  - An invalid-type test (where schema allows)
-  - A test per declared error response code
-
-Two modes:
-  - Mock mode (default, no base_url): uses `responses` library to stub HTTP
-  - Live mode (base_url provided): hits the real server via `requests`
+Prompts are built from OperationInfo facts extracted deterministically by
+spec_parser.py. The generated suite always targets a real server whose
+address is read from the BASE_URL environment variable; nothing is stubbed,
+so a passing test means the live API behaved as documented.
 """
 
-import os
 import re
 
-import requests as _requests
-
+import gemini_client
 from spec_parser import OperationInfo
 
-# --------------------------------------------------------------------------
-# Prompt templates
-# --------------------------------------------------------------------------
-
 SPEC_SYSTEM_PROMPT = """\
-You are an expert Python test engineer specialising in API testing.
-Given metadata about an API endpoint or GraphQL operation, write a complete pytest test module.
+You are an expert API test engineer. Given facts about one API endpoint or GraphQL operation,
+write a complete pytest module that tests it against a running server.
 Rules:
-- Use only pytest (no unittest classes).
-- Name every test function test_<something>.
-- Output ONLY the Python code — no prose, no markdown fences.
-- Use the `requests` library for HTTP calls.
-- In MOCK MODE: use the `responses` library (pip install responses) to stub all HTTP calls.
-  Import it at the top. Never make real network calls.
-- In LIVE MODE: hit the provided base_url for real using `requests`.
-- Always include: a happy-path test, a missing-required-param test (expect 422 or 400),
-  an invalid-type test, and one test per declared error response code.\
-"""
+- Use pytest and the `requests` library only. Name every test function test_<something>.
+- Read the server address once: `BASE_URL = os.environ["BASE_URL"].rstrip("/")`. Never hard-code hosts.
+- Pass timeout=10 to every request.
+- Cover: the happy path with valid inputs, a missing required parameter (expect 400 or 422),
+  an invalid parameter type, and each documented error response. Assert status codes and the
+  documented response shape (required fields and their types).
+- For GraphQL, POST {"query": ..., "variables": ...} to BASE_URL and check `data` / `errors`.
+- Output ONLY Python code — no prose, no markdown fences."""
 
 
 def build_spec_user_prompt(op: OperationInfo, base_url: str = "") -> str:
@@ -76,92 +61,29 @@ def build_spec_user_prompt(op: OperationInfo, base_url: str = "") -> str:
 
     lines.append("")
     if base_url:
-        lines.append(f"MODE: LIVE — base URL is {base_url!r}. Use requests to hit the real server.")
+        lines.append(f"The suite will run now against {base_url}, exposed to the tests as BASE_URL.")
     else:
-        lines.append(
-            "MODE: MOCK — use the `responses` library to stub all HTTP calls. "
-            "Do NOT make real network calls."
-        )
-
+        lines.append("No server is available yet; the user will run the suite later with BASE_URL set.")
     lines.append("")
     lines.append("Write pytest tests covering: happy path, missing required param, "
                  "invalid type, and each error response code.")
     return "\n".join(lines)
 
 
-# --------------------------------------------------------------------------
-# Helpers (mirror llm.py helpers — no import to avoid coupling)
-# --------------------------------------------------------------------------
+_REQUIRED_IMPORTS = ("import os", "import pytest", "import requests")
 
-def _strip_markdown_fences(text: str) -> str:
-    """Remove leading/trailing ```python … ``` fences if present."""
-    text = text.strip()
-    text = re.sub(r"^```(?:python)?\n?", "", text)
-    text = re.sub(r"\n?```$", "", text)
-    return text.strip()
-
-
-def _mock_generate_spec(op: OperationInfo, base_url: str = "") -> str:
-    """Return a minimal placeholder test when no LLM is available."""
-    safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", op.name)
-    mode_comment = f"# base_url={base_url!r}" if base_url else "# mock mode"
-    return (
-        f"# Auto-generated placeholder tests for {op.name}\n"
-        f"# {mode_comment}\n"
-        f"import pytest\n\n"
-        f"def test_{safe_name}_placeholder():\n"
-        f"    pass\n"
-    )
-
-
-# --------------------------------------------------------------------------
-# Public API
-# --------------------------------------------------------------------------
 
 def generate_spec_tests(op: OperationInfo, base_url: str = "") -> str:
     """
-    Generate pytest test code for *op* (an OperationInfo).
+    Generate a pytest module for *op* with Gemini.
 
-    Uses the Groq chat-completions API when GROQ_API_KEY is set; otherwise
-    falls back to _mock_generate_spec().
-
-    Parameters
-    ----------
-    op:
-        The parsed API operation to generate tests for.
-    base_url:
-        Optional live server base URL.  Empty string → mock mode.
+    Raises gemini_client.GeminiError when the model is not configured or
+    unavailable — callers report that instead of substituting placeholder tests.
     """
-    api_key = os.environ.get("GROQ_API_KEY")
-    if not api_key:
-        return _mock_generate_spec(op, base_url)
-
-    user_prompt = build_spec_user_prompt(op, base_url=base_url)
-
-    try:
-        response = _requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "llama-3.3-70b-versatile",
-                "messages": [
-                    {"role": "system", "content": SPEC_SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "temperature": 0.2,
-                "max_tokens": 1000,
-            },
-            timeout=30,
-        )
-        response.raise_for_status()
-        response_json = response.json()
-        raw_text = response_json["choices"][0]["message"]["content"]
-    except Exception as exc:
-        print(f"[spec_llm] Groq API call failed for {op.name!r} ({exc}); falling back to mock.")
-        return _mock_generate_spec(op, base_url)
-
-    code = _strip_markdown_fences(raw_text)
+    result = gemini_client.generate(SPEC_SYSTEM_PROMPT, build_spec_user_prompt(op, base_url=base_url),
+                                    max_output_tokens=8192)
+    code = gemini_client.strip_fences(result.text)
+    missing = [imp for imp in _REQUIRED_IMPORTS if not re.search(rf"^{imp}\b", code, re.M)]
+    if missing:
+        code = "\n".join(missing) + "\n" + code
     return code

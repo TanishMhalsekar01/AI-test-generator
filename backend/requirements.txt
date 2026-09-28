@@ -1,0 +1,24 @@
+# Web app
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
+requests>=2.31
+pyyaml>=6.0
+
+# Persistence (Supabase Postgres in production, SQLite locally)
+sqlalchemy>=2.0
+psycopg[binary]>=3.1
+cryptography>=42
+
+# Spec / contract checks
+jsonschema>=4.21
+graphql-core>=3.2
+
+# Analysis sandbox: test execution, coverage, Python linting
+pytest>=8.0
+pytest-cov>=5.0
+pylint>=3.0
+responses>=0.25
+
+# Test suite
+httpx2>=2.0
