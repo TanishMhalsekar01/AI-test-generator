@@ -85,7 +85,7 @@ def generate_tests(info: FunctionInfo, module_import_name: str = "target") -> st
                 "Content-Type": "application/json",
             },
             json={
-                "model": "openai/gpt-oss-120b",
+                "model": "llama-3.3-70b-versatile",
                 "messages": [
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": user_prompt},
@@ -99,16 +99,22 @@ def generate_tests(info: FunctionInfo, module_import_name: str = "target") -> st
         response_json = response.json()
         raw_text = response_json["choices"][0]["message"]["content"]
     except Exception as exc:
-     print(f"[llm] Groq API call failed ({exc}); falling back to mock output.")
-     return _mock_generate(info, module_import_name)
+        print(f"[llm] Groq API call failed ({exc}); falling back to mock output.")
+        return _mock_generate(info, module_import_name)
+
     code = _strip_markdown_fences(raw_text)
 
-    # Drop any stray import lines the model may have emitted
+    # Drop any stray import lines the model may have emitted — we'll
+    # re-add the ones we need ourselves so they are always present.
     code = "\n".join(
         line for line in code.splitlines()
         if not line.startswith("import ") and not line.startswith("from ")
     )
-    if "import pytest" not in code:
-     code = "import pytest\n" + code
-     code: str = f"from {module_import_name} import {info.name}\n\n" + code
+
+    # Always prepend the two required imports regardless of what the model produced.
+    code = (
+        f"import pytest\n"
+        f"from {module_import_name} import {info.name}\n\n"
+        + code
+    )
     return code

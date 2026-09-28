@@ -3,8 +3,20 @@ Stage 1 — Upload
 FastAPI app that accepts a .py file upload and returns parsed function metadata.
 """
 
+import os
+from pathlib import Path
+
+# Load .env from the backend directory so GROQ_API_KEY is available
+_ENV_FILE = Path(__file__).parent / ".env"
+if _ENV_FILE.exists():
+    for _line in _ENV_FILE.read_text().splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _v = _line.split("=", 1)
+            os.environ.setdefault(_k.strip(), _v.strip())
+
 from fastapi import FastAPI, UploadFile, HTTPException, Form
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from typing import Optional
 from pydantic import BaseModel
@@ -18,8 +30,17 @@ from spec_parser import parse_spec
 from spec_llm import generate_spec_tests
 from github_fetcher import fetch_python_files
 
+# Resolve frontend dir relative to this file so it works regardless of
+# which directory uvicorn is launched from.
+_FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
+
 app = FastAPI(title="AI Unit-Test Generator — Stage 1/2 (Upload + Parse)")
-app.mount("/ui", StaticFiles(directory="static", html=True), name="ui")
+app.mount("/ui", StaticFiles(directory=str(_FRONTEND_DIR), html=True), name="ui")
+
+
+@app.get("/", include_in_schema=False)
+async def root_redirect():
+    return RedirectResponse(url="/ui/")
 
 
 @app.post("/analyze")

@@ -146,7 +146,7 @@ def generate_spec_tests(op: OperationInfo, base_url: str = "") -> str:
                 "Content-Type": "application/json",
             },
             json={
-                "model": "openai/gpt-oss-120b",
+                "model": "llama-3.3-70b-versatile",
                 "messages": [
                     {"role": "system", "content": SPEC_SYSTEM_PROMPT},
                     {"role": "user", "content": user_prompt},

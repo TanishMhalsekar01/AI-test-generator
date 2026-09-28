@@ -7,3 +7,4 @@ coverage.json
 result.json
 result2.json
 debug_runner.py
+.env
