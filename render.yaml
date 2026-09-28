@@ -21,6 +21,9 @@ services:
         sync: false
       - key: GEMINI_MODEL
         value: gemini-2.5-pro
+      # Tried in order when GEMINI_MODEL cannot answer (404 / quota / overloaded). "none" = no fallback.
+      - key: GEMINI_FALLBACK_MODELS
+        value: gemini-3.6-flash,gemini-3-flash-preview,gemini-3.1-flash-lite
       - key: GEMINI_API_KEY
         sync: false
       - key: GITHUB_CLIENT_ID

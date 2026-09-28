@@ -3,18 +3,24 @@ Minimal Google Gemini client (REST, v1beta generateContent).
 
 - The API key is read from GEMINI_API_KEY and sent only in the
   ``x-goog-api-key`` header — never in the URL, logs or error messages.
-- Only the configured model is used (default ``gemini-2.5-pro``). Transient
-  failures (429 / 5xx / network) are retried with exponential backoff; when the
-  retries are exhausted a GeminiUnavailable error is raised. There is no silent
-  fallback to another model and no placeholder output.
+- Models are tried in order: GEMINI_MODEL first, then GEMINI_FALLBACK_MODELS.
+  A model that cannot answer — not available to the key (404), out of quota
+  (429) or overloaded (5xx) — is skipped for a cooldown and the next one is
+  tried. The model that actually answered is returned and stored in reports.
+  With GEMINI_FALLBACK_MODELS empty, only GEMINI_MODEL is ever used.
+- Transient failures are retried with exponential backoff. While other models
+  remain, a busy model gets one quick retry before the next model is tried.
+- There is never placeholder output: when no model answers, the GeminiError
+  says why for each model.
 """
 
 import json
 import random
 import re
+import threading
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 
 import requests
 
@@ -40,27 +46,43 @@ class GeminiNotConfigured(GeminiError):
 
 
 class GeminiUnavailable(GeminiError):
-    pass
+    """The model cannot answer right now; another model may."""
 
 
 class GeminiQuotaExceeded(GeminiUnavailable):
-    """The API key's quota (e.g. the free tier's daily request cap) is used up."""
+    """The API key's quota for the model is used up, or it has none (free tier limit 0)."""
 
 
-# Circuit breaker: after a quota or availability failure, later calls fail fast
-# for a while instead of each spending minutes on retries (matters for repo runs).
-_breaker: dict = {"until": 0.0, "error": None}
+class GeminiModelUnavailable(GeminiUnavailable):
+    """The model does not exist for this API key (HTTP 404), e.g. closed to new projects."""
+
+
+# Per-model circuit breaker: after a quota, 404 or availability failure the model is
+# skipped for a while instead of every call spending time on it (matters for repo runs).
+_breakers: dict[str, tuple[float, GeminiError]] = {}
+_breaker_lock = threading.Lock()
 QUOTA_COOLDOWN = 900
 UNAVAILABLE_COOLDOWN = 60
+RATE_LIMIT_COOLDOWN = 20
 
 
 def reset_breaker() -> None:
-    _breaker.update(until=0.0, error=None)
+    with _breaker_lock:
+        _breakers.clear()
 
 
-def _trip(error: GeminiError, seconds: float) -> GeminiError:
-    _breaker.update(until=time.monotonic() + seconds, error=error)
+def _trip(model: str, error: GeminiError, seconds: float) -> GeminiError:
+    with _breaker_lock:
+        _breakers[model] = (time.monotonic() + seconds, error)
     return error
+
+
+def _open_breaker(model: str) -> Optional[GeminiError]:
+    with _breaker_lock:
+        entry = _breakers.get(model)
+    if entry and time.monotonic() < entry[0]:
+        return entry[1]
+    return None
 
 
 def _quota_details(resp: requests.Response) -> tuple[bool, bool, float]:
@@ -123,8 +145,6 @@ def generate(
             "GEMINI_API_KEY is not set on the server, so the AI review step was skipped."
         )
 
-    model = settings.gemini_model
-    url = f"{API_ROOT}/models/{model}:generateContent"
     generation_config: dict[str, Any] = {
         "temperature": temperature,
         "maxOutputTokens": max_output_tokens + THINKING_TOKENS,
@@ -138,10 +158,35 @@ def generate(
     }
     headers = {"x-goog-api-key": settings.gemini_api_key, "Content-Type": "application/json"}
 
-    if time.monotonic() < _breaker["until"] and _breaker["error"] is not None:
-        raise _breaker["error"]
+    models = settings.gemini_models
+    full_attempts = settings.gemini_max_retries + 1
+    failures: list[GeminiError] = []
+    for i, model in enumerate(models):
+        has_next = i < len(models) - 1
+        blocked = _open_breaker(model)
+        if blocked is not None:
+            failures.append(blocked)
+            continue
+        try:
+            return _call_model(model, body, headers, timeout=timeout, has_next=has_next,
+                               attempts=min(2, full_attempts) if has_next else full_attempts)
+        except GeminiUnavailable as exc:  # this model cannot answer now; try the next one
+            failures.append(exc)
 
-    attempts = settings.gemini_max_retries + 1
+    if len(failures) == 1:
+        raise failures[0]
+    cls = GeminiQuotaExceeded if all(isinstance(f, GeminiQuotaExceeded) for f in failures) else GeminiUnavailable
+    raise cls("No Gemini model could answer. " + " | ".join(str(f) for f in failures))
+
+
+def _call_model(model: str, body: dict, headers: dict, *, timeout: int, attempts: int,
+                has_next: bool) -> GeminiResult:
+    """Call one model with retries.
+
+    Raises GeminiUnavailable (or a subclass) when this model cannot answer, so the
+    caller may try another model. Any other GeminiError is final.
+    """
+    url = f"{API_ROOT}/models/{model}:generateContent"
     last_error = ""
     for attempt in range(attempts):
         delay = min(30.0, 2 ** (attempt + 1)) + random.uniform(0, 1)
@@ -158,30 +203,35 @@ def generate(
                     raise GeminiError(f"{model} returned an empty response (finishReason={finish or 'unknown'}).")
                 return GeminiResult(text=text, model=model, finish_reason=finish)
             message = _error_message(resp)
+            if resp.status_code == 404:
+                raise _trip(model, GeminiModelUnavailable(
+                    redact(f"{model} is not available to this API key (HTTP 404: {message})")
+                ), QUOTA_COOLDOWN)
             if resp.status_code == 429:
                 no_quota, daily, retry_after = _quota_details(resp)
                 if no_quota:
-                    raise _trip(GeminiQuotaExceeded(
+                    raise _trip(model, GeminiQuotaExceeded(
                         f"{model} has no free-tier quota on this API key (Google reports a limit of 0). "
-                        "Enable billing for the project in Google AI Studio, or set GEMINI_MODEL to a model "
-                        "the key can use."
+                        "Enable billing for the project in Google AI Studio, or use a model the key can use."
                     ), QUOTA_COOLDOWN)
                 if daily:
-                    raise _trip(GeminiQuotaExceeded(
+                    raise _trip(model, GeminiQuotaExceeded(
                         f"The daily request quota for {model} on this API key is used up (Google free tier). "
                         "Enable billing for the Google AI project or wait for the quota to reset."
                     ), QUOTA_COOLDOWN)
+                if has_next:  # per-minute limit: another model can answer now instead of waiting
+                    raise _trip(model, GeminiUnavailable(
+                        f"{model} is over its per-minute request limit."
+                    ), max(RATE_LIMIT_COOLDOWN, retry_after))
                 if retry_after:
                     delay = min(60.0, retry_after + 1)
-            elif resp.status_code == 404:
-                raise GeminiError(redact(f"{model} is not available to this API key (HTTP 404: {message})"))
             elif resp.status_code not in RETRYABLE_STATUS:
                 raise GeminiError(redact(f"{model} request failed with HTTP {resp.status_code}: {message}"))
             last_error = f"HTTP {resp.status_code}: {message.splitlines()[0] if message else ''}"
         if attempt < attempts - 1:
             _sleep(delay)
 
-    raise _trip(GeminiUnavailable(
+    raise _trip(model, GeminiUnavailable(
         redact(f"{model} is unavailable after {attempts} attempt(s) ({last_error}). Try again shortly.")
     ), UNAVAILABLE_COOLDOWN)
 

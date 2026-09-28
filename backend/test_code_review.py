@@ -89,3 +89,18 @@ def test_code_run_validation(signed_in_client):
     assert signed_in_client.post("/api/runs/code", data={}).status_code == 400
     big = "x" * 300_001
     assert signed_in_client.post("/api/runs/code", data={"code": big, "filename": "a.py"}).status_code == 413
+
+
+def test_code_run_records_the_fallback_model_that_answered(signed_in_client, mock_gemini, monkeypatch):
+    from conftest import gemini_response
+    monkeypatch.setenv("GEMINI_FALLBACK_MODELS", "gemini-3.6-flash")
+    closed = gemini_response("", 404)
+    closed.json.return_value = {"error": {"message": "This model is no longer available to new users."}}
+    mock_gemini(closed, REVIEW, TRIAGE)
+    assert signed_in_client.get("/api/me").json()["fallback_models"] == ["gemini-3.6-flash"]
+    resp = signed_in_client.post("/api/runs/code", files=[("files", ("stats.py", io.BytesIO(BUGGY.encode()), "text/x-python"))])
+    run = signed_in_client.get(f"/api/runs/{resp.json()['id']}").json()
+    assert run["status"] == "completed"
+    assert run["model"] == "gemini-3.6-flash"
+    assert run["report"]["files"][0]["review"]["model"] == "gemini-3.6-flash"
+    assert run["summary"]["models"] == ["gemini-3.6-flash"]

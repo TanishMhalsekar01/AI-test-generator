@@ -150,6 +150,7 @@ def me(user: CurrentUser = Depends(current_user)):
         "name": user.name,
         "avatar_url": user.avatar_url,
         "model": s.gemini_model,
+        "fallback_models": list(s.gemini_fallback_models),
         "ai_configured": s.ai_configured,
         "runners": executors.available_runners(),
         "limits": {"upload_files": MAX_UPLOAD_FILES, "file_bytes": MAX_FILE_BYTES, "repo_files": s.max_repo_files},
@@ -204,10 +205,17 @@ async def create_code_run(
             reports.append(code_review.review_file(name, text, run_tests=run_tests,
                                                    progress=lambda msg, b=base: progress(b, msg)))
         summary = code_review.summarize(reports)
-        return {"files": reports}, summary, {"languages": ",".join(repo_analyzer.languages_of(reports))}
+        return {"files": reports}, summary, {"languages": ",".join(repo_analyzer.languages_of(reports)),
+                                             **_answered_by(summary)}
 
     jobs.submit(run_id, job)
     return {"id": run_id}
+
+
+def _answered_by(summary: dict) -> dict:
+    """Record the model(s) that actually answered (a fallback may have been used)."""
+    models = summary.get("models") or []
+    return {"model": ", ".join(models)[:100]} if models else {}
 
 
 class RepoRunRequest(BaseModel):
@@ -240,7 +248,8 @@ def create_repo_run(body: RepoRunRequest, user: CurrentUser = Depends(current_us
             client, info["owner"]["login"], info["name"], sha, max_files, progress)
         report["branch"] = branch
         report["html_url"] = info.get("html_url")
-        return report, summary, {"languages": ",".join(repo_analyzer.languages_of(report["files"]))}
+        return report, summary, {"languages": ",".join(repo_analyzer.languages_of(report["files"])),
+                                 **_answered_by(summary)}
 
     jobs.submit(run_id, job)
     return {"id": run_id}
@@ -304,7 +313,7 @@ async def create_spec_run(
         report, summary = spec_checks.analyze_spec(
             raw, filename, schema_raw=schema_raw, base_url=base, allow_mutations=allow_mutations,
             generate_tests=generate_tests, progress=progress)
-        return report, summary, {"languages": report["kind"]}
+        return report, summary, {"languages": report["kind"], **_answered_by(summary)}
 
     jobs.submit(run_id, job)
     return {"id": run_id}

@@ -91,7 +91,11 @@ async function start() {
     document.getElementById('view').append(banner('error', 'Could not load your session', err.message));
     return;
   }
-  document.getElementById('model-tag').textContent = me.model;
+  const modelTag = document.getElementById('model-tag');
+  modelTag.textContent = me.model;
+  if ((me.fallback_models || []).length) {
+    modelTag.title = `Model used for review and test generation. When it is unavailable: ${me.fallback_models.join(', ')}`;
+  }
   document.getElementById('user').append(
     me.avatar_url ? h('img', { class: 'avatar', src: me.avatar_url, alt: '' }) : null,
     h('span', { class: 'login', text: me.login }));

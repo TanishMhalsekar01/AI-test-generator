@@ -1,14 +1,14 @@
 // Code review: upload files or paste code in any language.
 import { postForm } from '../api.js';
 import { h } from '../dom.js';
-import { pageHead, card, banner } from '../components.js';
+import { pageHead, card, banner, modelLabel } from '../components.js';
 
 const RUNNER_NAMES = { python: 'Python', javascript: 'JavaScript', go: 'Go', ruby: 'Ruby', rust: 'Rust' };
 
 export async function render(root, { me, navigate }) {
   const runnable = Object.entries(me.runners).filter(([, ok]) => ok).map(([k]) => RUNNER_NAMES[k]);
   root.append(pageHead('Code review',
-    `Each file is checked with the real compiler or linter for its language where one is installed, reviewed by ${me.model} for defects, and given a generated test suite. Tests are executed in a sandbox for ${runnable.join(', ')}; for other languages they are provided to run locally.`));
+    `Each file is checked with the real compiler or linter for its language where one is installed, reviewed by ${modelLabel(me)} for defects, and given a generated test suite. Tests are executed in a sandbox for ${runnable.join(', ')}; for other languages they are provided to run locally.`));
 
   if (!me.ai_configured) {
     root.append(banner('warn', 'AI review is not configured on this server',

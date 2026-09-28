@@ -7,7 +7,8 @@ against a running server. Users sign in with GitHub. Every run is stored against
 repositories, so history and team dashboards show only real, recorded results.
 
 - Production URL (after DNS setup): **https://aitestge.stream**
-- Model: Google Gemini **`gemini-2.5-pro`** (server-side only)
+- Model: Google Gemini **`gemini-2.5-pro`**, with automatic fallback to Gemini Flash models when it
+  cannot answer (server-side only)
 - Stack: FastAPI · SQLAlchemy (Supabase Postgres / SQLite) · vanilla HTML/CSS/JS · Docker on Render
 
 ---
@@ -37,9 +38,9 @@ Sign in with GitHub ─► submit code / repository / spec ─► run is queued 
         ▼
   1. Detect language (extension, shebang; unknown extensions are identified by the model)
   2. Static checks ...... real compilers / linters, line + column diagnostics
-  3. AI review .......... gemini-2.5-pro: findings (severity, category, lines, fix) + a test file
+  3. AI review .......... Gemini: findings (severity, category, lines, fix) + a test file
   4. Execute tests ...... sandboxed runner, per-test pass/fail + failure output + coverage
-  5. Triage failures .... gemini-2.5-pro: code defect vs wrong expectation, with the source line
+  5. Triage failures .... Gemini: code defect vs wrong expectation, with the source line
   6. Store report ....... summary + full report in the runs table ─► History / dashboards
 ```
 
@@ -139,7 +140,8 @@ All settings are environment variables. For local development, copy `backend/.en
 | Variable | Required | Description |
 |---|---|---|
 | `GEMINI_API_KEY` | yes (for AI) | Google AI Studio key. Used only by the server, sent in the `x-goog-api-key` header. |
-| `GEMINI_MODEL` | no | Defaults to `gemini-2.5-pro`. No other model is used as a fallback. |
+| `GEMINI_MODEL` | no | Main model, tried first. Defaults to `gemini-2.5-pro`. |
+| `GEMINI_FALLBACK_MODELS` | no | Comma-separated models tried in order when the main model cannot answer. Defaults to `gemini-3.6-flash,gemini-3-flash-preview,gemini-3.1-flash-lite`; `none` uses `GEMINI_MODEL` only. |
 | `GEMINI_MAX_RETRIES` | no | Retries on 429/5xx with exponential backoff (default 4). |
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | yes | GitHub OAuth App credentials. |
 | `SESSION_SECRET` | production | Random string; encrypts stored GitHub tokens. Auto-generated for local dev. |
@@ -151,18 +153,27 @@ All settings are environment variables. For local development, copy `backend/.en
 | `MAX_REPO_FILES` | no | Upper bound for files per repository run (default 25, max 100). |
 | `JOB_WORKERS` | no | Concurrent runs (default 3). |
 
-### Gemini quota
+### Gemini models, availability and quota
 
-The server uses **`gemini-2.5-pro` only**; there is no fallback model. Google has closed
-`gemini-2.5-pro` to new API projects: for such a key every call fails with HTTP 404 "no longer
-available to new users", and each report shows that error in its AI step. Use a key from a Google AI
-project that still has access to the model, with billing enabled for real use. One file uses one
-request, or two when its tests fail and need triage. Pro models "think" before answering; those
-thinking tokens are billed as output tokens.
+Each AI call tries `GEMINI_MODEL` first, then each of `GEMINI_FALLBACK_MODELS` in order. A model is
+skipped when Google answers that it:
 
-When the key's quota for the model is used up, the client stops immediately (no pointless
-retries) and pauses AI calls for 15 minutes. Compiler/linter results and live contract checks still
-complete, and reports clearly mark the AI step as not run.
+| Answer | Meaning | Skipped for |
+|---|---|---|
+| HTTP 404 "no longer available to new users" | The key's project cannot use the model (Google closed `gemini-2.5-pro` to new projects) | 15 min |
+| HTTP 429 with `limit: 0` | The model has no free-tier quota; it needs billing (e.g. `gemini-3.1-pro-preview`) | 15 min |
+| HTTP 429, daily quota | The key's daily requests for the model are used up | 15 min |
+| HTTP 429, per-minute quota | Too many requests this minute | 20 s or Google's retry delay |
+| HTTP 503 "high demand" | Google is overloaded (after one quick retry) | 1 min |
+
+The last model in the list gets the full retry budget (`GEMINI_MAX_RETRIES`). Every report records
+the model that actually answered, and a run shows it next to its duration. If no model answers,
+the file's AI step says why for each model; compiler/linter results and live contract checks still
+complete. Nothing is invented when the AI step fails.
+
+One file uses one request, or two when its tests fail and need triage. The free tier has small
+per-model daily limits, so enable billing on the Google AI project for real use. Pro models "think"
+before answering; those thinking tokens are billed as output tokens.
 
 ---
 
@@ -232,8 +243,8 @@ database connection can.
    check at `/healthz` and the domains `aitestge.stream` and `www.aitestge.stream`.
 2. Enter the environment variables marked `sync: false` in the Render dashboard: `GEMINI_API_KEY`,
    `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `DATABASE_URL` and `APP_BASE_URL` (the public URL,
-   e.g. `https://aitestge.stream`). `SESSION_SECRET` is generated automatically. The Gemini key must
-   belong to a Google AI project that can use `gemini-2.5-pro` (see [Gemini quota](#gemini-quota)).
+   e.g. `https://aitestge.stream`). `SESSION_SECRET` is generated automatically. See [Gemini models,
+   availability and quota](#gemini-models-availability-and-quota) for how models are chosen.
 3. **Register the domain** `aitestge.stream` with any registrar if you have not already.
 4. **DNS**: in Render, open the service → **Settings → Custom Domains** and create the records it
    shows at your DNS provider. At the time of writing these are:
@@ -331,5 +342,5 @@ This repository ships project-level Claude Code configuration:
   or third-party packages may need those dependencies, and such failures are triaged as
   *sandbox limitation*.
 - Repository runs analyze up to `MAX_REPO_FILES` files per run (application code before tests).
-- `gemini-2.5-pro` works only with a key from a Google AI project that still has access to it
-  (Google no longer offers it to new users).
+- `gemini-2.5-pro` answers only for keys from Google AI projects that still have access to it
+  (Google no longer offers it to new users); other keys are served by the fallback models.

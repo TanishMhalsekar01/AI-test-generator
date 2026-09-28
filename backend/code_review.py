@@ -308,4 +308,5 @@ def summarize(file_reports: list[dict]) -> dict:
         languages[rep["language"]] = languages.get(rep["language"], 0) + 1
     total["findings"] = sum(total[s] for s in SEVERITIES)
     total["languages"] = languages
+    total["models"] = sorted({rep["review"]["model"] for rep in file_reports if rep["review"].get("model")})
     return total

@@ -44,7 +44,7 @@ import executors
 import gemini_client
 from config import get_settings
 from spec_parser import MAX_OPERATIONS, parse_spec
-from spec_llm import generate_spec_tests
+from spec_llm import generate_spec_suite
 
 HTTP_METHODS = ("get", "put", "post", "delete", "options", "head", "patch", "trace")
 MAX_LIVE_OPERATIONS = 25
@@ -670,7 +670,7 @@ def _generate_and_run(ops: list, base_url: str, progress: Callable[[int, str], N
                           "execution": executors.not_executed("Skipped because the AI service is unavailable.")}
             return
         try:
-            code = generate_spec_tests(op, base_url=base_url)
+            code, model = generate_spec_suite(op, base_url=base_url)
         except (gemini_client.GeminiNotConfigured, gemini_client.GeminiUnavailable) as exc:
             abort["error"] = str(exc)
             results[i] = {"operation": op.name, "code": "", "error": str(exc),
@@ -685,7 +685,7 @@ def _generate_and_run(ops: list, base_url: str, progress: Callable[[int, str], N
             execution = executors.run_api_tests(code, base_url, name=f"test_{safe}.py")
         else:
             execution = executors.not_executed("No base URL was given; run this suite with BASE_URL=<your server>.")
-        results[i] = {"operation": op.name, "code": code, "error": None, "execution": execution}
+        results[i] = {"operation": op.name, "code": code, "error": None, "execution": execution, "model": model}
 
     done = 0
     with ThreadPoolExecutor(max_workers=4) as pool:
@@ -757,6 +757,9 @@ def analyze_spec(raw: str, filename: str = "", *, schema_raw: Optional[str] = No
     if ops and generate_tests:
         progress(40, "Generating API tests")
         report["tests"], report["ai"]["error"], report["tests_note"] = _generate_and_run(ops, base_url, progress)
+        answered = _models(report)
+        if answered:
+            report["ai"]["model"] = ", ".join(answered)
     report["issues"] = _locate(issues, index)
     order = {"error": 0, "warning": 1, "info": 2}
     report["issues"].sort(key=lambda i: (order.get(i["severity"], 3), i["line"] or 0))
@@ -780,7 +783,13 @@ def _summary(report: dict) -> dict:
         "tests_passed": sum(t.get("passed", 0) for t in tests),
         "tests_failed": sum(t.get("failed", 0) + t.get("errors", 0) for t in tests),
         "ai_error": (report.get("ai") or {}).get("error"),
+        "models": _models(report),
     }
+
+
+def _models(report: dict) -> list[str]:
+    """Models that actually generated tests (a fallback model may have been used)."""
+    return sorted({t["model"] for t in report.get("tests") or [] if t.get("model")})
 
 
 __all__ = ["analyze_spec", "detect_kind", "lint_openapi", "lint_graphql", "guard_url", "MAX_OPERATIONS"]

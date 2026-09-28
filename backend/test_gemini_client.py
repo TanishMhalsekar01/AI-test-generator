@@ -163,3 +163,90 @@ def test_model_closed_to_the_key_is_reported_without_retry_or_fallback(mock_gemi
     with pytest.raises(gemini_client.GeminiError, match="gemini-2.5-pro is not available to this API key"):
         gemini_client.generate("s", "p")
     assert len(calls) == 1 and "/models/gemini-2.5-pro:" in calls[0]["url"]
+
+
+# ---------------------------------------------------------------------------
+# Fallback models
+# ---------------------------------------------------------------------------
+
+def _404():
+    resp = gemini_response("", 404)
+    resp.json.return_value = {"error": {"code": 404, "message": "This model is no longer available to new users."}}
+    return resp
+
+
+def _limit_zero():
+    resp = _quota_429(daily=True)
+    resp.json.return_value["error"]["message"] = "Quota exceeded for metric: free_tier_requests, limit: 0"
+    return resp
+
+
+def test_fallback_answers_when_main_model_is_closed_to_the_key(mock_gemini, monkeypatch):
+    monkeypatch.setenv("GEMINI_FALLBACK_MODELS", "gemini-3.6-flash,gemini-3.1-flash-lite")
+    calls = mock_gemini(_404(), '{"ok": true}', '{"ok": 2}')
+    data, model = gemini_client.generate_json("s", "p")
+    assert (data, model) == ({"ok": True}, "gemini-3.6-flash")
+    assert ["gemini-2.5-pro" in calls[0]["url"], "gemini-3.6-flash" in calls[1]["url"]] == [True, True]
+    # The closed model is remembered: the next call goes straight to the fallback.
+    data, model = gemini_client.generate_json("s", "p")
+    assert (data, model) == ({"ok": 2}, "gemini-3.6-flash")
+    assert len(calls) == 3 and "gemini-3.6-flash" in calls[2]["url"]
+
+
+def test_busy_main_model_gets_one_quick_retry_then_fallback(mock_gemini, monkeypatch):
+    monkeypatch.setenv("GEMINI_FALLBACK_MODELS", "gemini-3.6-flash")
+    busy = gemini_response("", 503)
+    calls = mock_gemini(busy, busy, '{"ok": true}')
+    _, model = gemini_client.generate_json("s", "p")
+    assert model == "gemini-3.6-flash"
+    assert [c["url"].split("/models/")[1].split(":")[0] for c in calls] == [
+        "gemini-2.5-pro", "gemini-2.5-pro", "gemini-3.6-flash"]
+
+
+def test_per_minute_limit_moves_to_fallback_without_waiting(mock_gemini, monkeypatch):
+    monkeypatch.setenv("GEMINI_FALLBACK_MODELS", "gemini-3.6-flash")
+    slept = []
+    monkeypatch.setattr(gemini_client, "_sleep", slept.append)
+    calls = mock_gemini(_quota_429(daily=False, retry="40s"), '{"ok": true}')
+    _, model = gemini_client.generate_json("s", "p")
+    assert model == "gemini-3.6-flash" and len(calls) == 2 and slept == []
+
+
+def test_every_model_failing_explains_each_one(mock_gemini, monkeypatch):
+    monkeypatch.setenv("GEMINI_FALLBACK_MODELS", "gemini-3.1-pro-preview,gemini-3.6-flash")
+    monkeypatch.setenv("GEMINI_MAX_RETRIES", "1")
+    calls = mock_gemini(_404(), _limit_zero(), gemini_response("", 503))
+    with pytest.raises(gemini_client.GeminiUnavailable) as exc:
+        gemini_client.generate("s", "p")
+    message = str(exc.value)
+    assert message.startswith("No Gemini model could answer.")
+    assert "gemini-2.5-pro is not available to this API key" in message
+    assert "gemini-3.1-pro-preview has no free-tier quota" in message
+    assert "gemini-3.6-flash is unavailable after 2 attempt(s)" in message
+    assert len(calls) == 4  # 404 and quota: no retry; last model: full retries
+
+
+def test_all_models_out_of_quota_is_a_quota_error(mock_gemini, monkeypatch):
+    monkeypatch.setenv("GEMINI_FALLBACK_MODELS", "gemini-3.6-flash")
+    mock_gemini(_limit_zero())
+    with pytest.raises(gemini_client.GeminiQuotaExceeded, match="No Gemini model could answer"):
+        gemini_client.generate("s", "p")
+
+
+def test_request_errors_are_not_hidden_by_fallback(mock_gemini, monkeypatch):
+    monkeypatch.setenv("GEMINI_FALLBACK_MODELS", "gemini-3.6-flash")
+    calls = mock_gemini(gemini_response("", 400))
+    with pytest.raises(gemini_client.GeminiError, match="HTTP 400"):
+        gemini_client.generate("s", "p")
+    assert len(calls) == 1
+
+
+def test_fallback_model_setting(monkeypatch):
+    import config
+    monkeypatch.delenv("GEMINI_FALLBACK_MODELS")
+    assert config.get_settings().gemini_fallback_models == config.DEFAULT_GEMINI_FALLBACK_MODELS
+    for off in ("", "none", "OFF"):
+        monkeypatch.setenv("GEMINI_FALLBACK_MODELS", off)
+        assert config.get_settings().gemini_models == ("gemini-2.5-pro",)
+    monkeypatch.setenv("GEMINI_FALLBACK_MODELS", " gemini-3.6-flash , gemini-2.5-pro ")
+    assert config.get_settings().gemini_models == ("gemini-2.5-pro", "gemini-3.6-flash")

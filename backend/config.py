@@ -11,6 +11,7 @@ import os
 import secrets
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 BACKEND_DIR = Path(__file__).resolve().parent
 REPO_ROOT = BACKEND_DIR.parent
@@ -18,6 +19,9 @@ FRONTEND_DIR = REPO_ROOT / "frontend"
 DATA_DIR = BACKEND_DIR / "data"
 
 DEFAULT_GEMINI_MODEL = "gemini-2.5-pro"
+# Tried in order when the main model cannot answer (not available to the key, out of
+# quota, or overloaded). GEMINI_FALLBACK_MODELS overrides; "none" disables fallback.
+DEFAULT_GEMINI_FALLBACK_MODELS = ("gemini-3.6-flash", "gemini-3-flash-preview", "gemini-3.1-flash-lite")
 
 
 def load_dotenv(path: Path = BACKEND_DIR / ".env") -> None:
@@ -73,6 +77,7 @@ class Settings:
     canonical_host: str
     gemini_api_key: str
     gemini_model: str
+    gemini_fallback_models: tuple[str, ...]
     gemini_max_retries: int
     github_client_id: str
     github_client_secret: str
@@ -97,6 +102,19 @@ class Settings:
     @property
     def ai_configured(self) -> bool:
         return bool(self.gemini_api_key)
+
+    @property
+    def gemini_models(self) -> tuple[str, ...]:
+        """GEMINI_MODEL followed by the fallback models, without duplicates."""
+        return tuple(dict.fromkeys((self.gemini_model, *self.gemini_fallback_models)))
+
+
+def _model_list(raw: Optional[str]) -> tuple[str, ...]:
+    if raw is None:
+        return DEFAULT_GEMINI_FALLBACK_MODELS
+    if raw.strip().lower() in ("", "none", "off"):
+        return ()
+    return tuple(m.strip() for m in raw.split(",") if m.strip())
 
 
 def get_settings() -> Settings:
@@ -126,6 +144,7 @@ def get_settings() -> Settings:
         canonical_host=canonical,
         gemini_api_key=os.environ.get("GEMINI_API_KEY", "").strip(),
         gemini_model=os.environ.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL).strip() or DEFAULT_GEMINI_MODEL,
+        gemini_fallback_models=_model_list(os.environ.get("GEMINI_FALLBACK_MODELS")),
         gemini_max_retries=max(0, int(os.environ.get("GEMINI_MAX_RETRIES", "4"))),
         github_client_id=os.environ.get("GITHUB_CLIENT_ID", "").strip(),
         github_client_secret=os.environ.get("GITHUB_CLIENT_SECRET", "").strip(),
