@@ -3,7 +3,7 @@ Minimal Google Gemini client (REST, v1beta generateContent).
 
 - The API key is read from GEMINI_API_KEY and sent only in the
   ``x-goog-api-key`` header — never in the URL, logs or error messages.
-- Only the configured model is used (default ``gemini-3.1-pro-preview``). Transient
+- Only the configured model is used (default ``gemini-2.5-pro``). Transient
   failures (429 / 5xx / network) are retried with exponential backoff; when the
   retries are exhausted a GeminiUnavailable error is raised. There is no silent
   fallback to another model and no placeholder output.
@@ -173,6 +173,8 @@ def generate(
                     ), QUOTA_COOLDOWN)
                 if retry_after:
                     delay = min(60.0, retry_after + 1)
+            elif resp.status_code == 404:
+                raise GeminiError(redact(f"{model} is not available to this API key (HTTP 404: {message})"))
             elif resp.status_code not in RETRYABLE_STATUS:
                 raise GeminiError(redact(f"{model} request failed with HTTP {resp.status_code}: {message}"))
             last_error = f"HTTP {resp.status_code}: {message.splitlines()[0] if message else ''}"

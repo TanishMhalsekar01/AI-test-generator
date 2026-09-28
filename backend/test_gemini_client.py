@@ -10,9 +10,9 @@ def test_request_uses_configured_model_and_header_key(mock_gemini):
     calls = mock_gemini('{"ok": true}')
     data, model = gemini_client.generate_json("sys", "prompt")
     assert data == {"ok": True}
-    assert model == "gemini-3.1-pro-preview"
+    assert model == "gemini-2.5-pro"
     call = calls[0]
-    assert call["url"].endswith("/models/gemini-3.1-pro-preview:generateContent")
+    assert call["url"].endswith("/models/gemini-2.5-pro:generateContent")
     assert call["headers"]["x-goog-api-key"] == "test-gemini-key-000000"
     assert "key=" not in call["url"]  # never in the URL
     assert call["json"]["generationConfig"]["responseMimeType"] == "application/json"
@@ -34,8 +34,8 @@ def test_gives_up_after_retries_without_switching_model(mock_gemini, monkeypatch
     with pytest.raises(gemini_client.GeminiUnavailable) as exc:
         gemini_client.generate("s", "p")
     assert len(calls) == 3
-    assert all("gemini-3.1-pro-preview" in c["url"] for c in calls)
-    assert "gemini-3.1-pro-preview is unavailable" in str(exc.value)
+    assert all("gemini-2.5-pro" in c["url"] for c in calls)
+    assert "gemini-2.5-pro is unavailable" in str(exc.value)
 
 
 def test_non_retryable_error_raises_immediately(mock_gemini):
@@ -154,3 +154,12 @@ def test_truncated_json_answer_is_reported(monkeypatch):
     monkeypatch.setattr(gemini_client.requests, "post", lambda *a, **k: resp)
     with pytest.raises(gemini_client.GeminiError, match="cut off at the output token limit"):
         gemini_client.generate_json("s", "p")
+
+
+def test_model_closed_to_the_key_is_reported_without_retry_or_fallback(mock_gemini):
+    resp = gemini_response("", 404)
+    resp.json.return_value = {"error": {"code": 404, "message": "This model models/gemini-2.5-pro is no longer available to new users."}}
+    calls = mock_gemini(resp)
+    with pytest.raises(gemini_client.GeminiError, match="gemini-2.5-pro is not available to this API key"):
+        gemini_client.generate("s", "p")
+    assert len(calls) == 1 and "/models/gemini-2.5-pro:" in calls[0]["url"]

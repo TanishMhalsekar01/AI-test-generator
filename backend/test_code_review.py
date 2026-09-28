@@ -37,7 +37,7 @@ def test_review_file_runs_tests_and_triages(mock_gemini):
     rep = code_review.review_file("stats.py", BUGGY)
     assert rep["language"] == "Python"
     assert rep["review"]["status"] == "ok"
-    assert rep["review"]["model"] == "gemini-3.1-pro-preview"
+    assert rep["review"]["model"] == "gemini-2.5-pro"
     findings = rep["review"]["findings"]
     assert findings[0]["severity"] == "high"
     assert findings[-1]["line"] == 3  # clamped to file length

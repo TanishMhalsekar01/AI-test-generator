@@ -7,7 +7,7 @@ against a running server. Users sign in with GitHub. Every run is stored against
 repositories, so history and team dashboards show only real, recorded results.
 
 - Production URL (after DNS setup): **https://aitestge.stream**
-- Model: Google Gemini **`gemini-3.1-pro-preview`** (server-side only)
+- Model: Google Gemini **`gemini-2.5-pro`** (server-side only)
 - Stack: FastAPI · SQLAlchemy (Supabase Postgres / SQLite) · vanilla HTML/CSS/JS · Docker on Render
 
 ---
@@ -37,9 +37,9 @@ Sign in with GitHub ─► submit code / repository / spec ─► run is queued 
         ▼
   1. Detect language (extension, shebang; unknown extensions are identified by the model)
   2. Static checks ...... real compilers / linters, line + column diagnostics
-  3. AI review .......... gemini-3.1-pro-preview: findings (severity, category, lines, fix) + a test file
+  3. AI review .......... gemini-2.5-pro: findings (severity, category, lines, fix) + a test file
   4. Execute tests ...... sandboxed runner, per-test pass/fail + failure output + coverage
-  5. Triage failures .... gemini-3.1-pro-preview: code defect vs wrong expectation, with the source line
+  5. Triage failures .... gemini-2.5-pro: code defect vs wrong expectation, with the source line
   6. Store report ....... summary + full report in the runs table ─► History / dashboards
 ```
 
@@ -139,7 +139,7 @@ All settings are environment variables. For local development, copy `backend/.en
 | Variable | Required | Description |
 |---|---|---|
 | `GEMINI_API_KEY` | yes (for AI) | Google AI Studio key. Used only by the server, sent in the `x-goog-api-key` header. |
-| `GEMINI_MODEL` | no | Defaults to `gemini-3.1-pro-preview`. No other model is used as a fallback. |
+| `GEMINI_MODEL` | no | Defaults to `gemini-2.5-pro`. No other model is used as a fallback. |
 | `GEMINI_MAX_RETRIES` | no | Retries on 429/5xx with exponential backoff (default 4). |
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | yes | GitHub OAuth App credentials. |
 | `SESSION_SECRET` | production | Random string; encrypts stored GitHub tokens. Auto-generated for local dev. |
@@ -153,15 +153,16 @@ All settings are environment variables. For local development, copy `backend/.en
 
 ### Gemini quota
 
-`gemini-3.1-pro-preview` is a paid model: **the Gemini API free tier gives it no quota (limit 0)**,
-so billing must be enabled for the Google AI Studio project that owns `GEMINI_API_KEY`. Without
-billing every AI call fails with a quota error, and the report says so. One file uses one request, or
-two when its tests fail and need triage. Pro models "think" before answering; those thinking tokens
-are billed as output tokens.
+The server uses **`gemini-2.5-pro` only**; there is no fallback model. Google has closed
+`gemini-2.5-pro` to new API projects: for such a key every call fails with HTTP 404 "no longer
+available to new users", and each report shows that error in its AI step. Use a key from a Google AI
+project that still has access to the model, with billing enabled for real use. One file uses one
+request, or two when its tests fail and need triage. Pro models "think" before answering; those
+thinking tokens are billed as output tokens.
 
-When the key has no quota for the model, or its daily quota is exhausted, the client stops
-immediately (no pointless retries) and pauses AI calls for 15 minutes. Compiler/linter results and live contract checks still complete, and
-reports clearly mark the AI step as not run.
+When the key's quota for the model is used up, the client stops immediately (no pointless
+retries) and pauses AI calls for 15 minutes. Compiler/linter results and live contract checks still
+complete, and reports clearly mark the AI step as not run.
 
 ---
 
@@ -232,7 +233,7 @@ database connection can.
 2. Enter the environment variables marked `sync: false` in the Render dashboard: `GEMINI_API_KEY`,
    `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `DATABASE_URL` and `APP_BASE_URL` (the public URL,
    e.g. `https://aitestge.stream`). `SESSION_SECRET` is generated automatically. The Gemini key must
-   belong to a Google AI project with billing enabled (see [Gemini quota](#gemini-quota)).
+   belong to a Google AI project that can use `gemini-2.5-pro` (see [Gemini quota](#gemini-quota)).
 3. **Register the domain** `aitestge.stream` with any registrar if you have not already.
 4. **DNS**: in Render, open the service → **Settings → Custom Domains** and create the records it
    shows at your DNS provider. At the time of writing these are:
@@ -330,4 +331,5 @@ This repository ships project-level Claude Code configuration:
   or third-party packages may need those dependencies, and such failures are triaged as
   *sandbox limitation*.
 - Repository runs analyze up to `MAX_REPO_FILES` files per run (application code before tests).
-- `gemini-3.1-pro-preview` needs a Google AI project with billing enabled; it has no free-tier quota.
+- `gemini-2.5-pro` works only with a key from a Google AI project that still has access to it
+  (Google no longer offers it to new users).
