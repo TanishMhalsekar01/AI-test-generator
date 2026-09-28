@@ -1,0 +1,12 @@
+type Query {
+  greeting: String!
+}
+
+type Mutation {
+  setGreeting(message: String!): String!
+}
+
+schema {
+  query: Query
+  mutation: Mutation
+}

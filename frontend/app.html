@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Test Generator</title>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/css/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#/"><img class="brand-mark" src="/assets/favicon.svg" alt="">AI Test Generator</a>
+    <span class="spacer"></span>
+    <span class="model-tag" id="model-tag" title="Model used for review and test generation"></span>
+    <button type="button" class="btn btn-ghost btn-sm" id="theme-toggle" title="Colour theme"></button>
+    <span class="user" id="user"></span>
+    <form method="post" action="/auth/logout">
+      <button type="submit" class="btn btn-sm" id="signout" title="Sign out"><span class="label">Sign out</span></button>
+    </form>
+  </header>
+  <div class="layout">
+    <nav class="sidenav" id="sidenav" aria-label="Main">
+      <a href="#/" data-route="overview">Overview</a>
+      <div class="nav-section">Analyze</div>
+      <a href="#/code" data-route="code">Code review</a>
+      <a href="#/repos" data-route="repos">Repositories</a>
+      <a href="#/specs" data-route="specs">API &amp; specs</a>
+      <div class="nav-section">Track</div>
+      <a href="#/history" data-route="history">History</a>
+      <a href="#/teams" data-route="teams">Teams</a>
+    </nav>
+    <main class="main" id="view" tabindex="-1"></main>
+  </div>
+  <script type="module" src="/assets/js/app.js"></script>
+</body>
+</html>

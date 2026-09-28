@@ -1,0 +1,35 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+# Deploy: Render dashboard -> New -> Blueprint -> select this repository.
+# Secrets marked `sync: false` are entered in the dashboard; they are never stored in git.
+services:
+  - type: web
+    name: ai-test-generator
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    healthCheckPath: /healthz
+    autoDeploy: true
+    domains:
+      - aitestgen.dev
+      - www.aitestgen.dev
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: APP_BASE_URL
+        value: https://aitestgen.dev
+      - key: GEMINI_MODEL
+        value: gemini-3.7-flash
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GITHUB_CLIENT_ID
+        sync: false
+      - key: GITHUB_CLIENT_SECRET
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: ALLOW_PRIVATE_TARGETS
+        value: "false"
+      - key: MAX_REPO_FILES
+        value: "25"

@@ -1,0 +1,24 @@
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+coverage.json
+
+# Secrets — never commit real keys. Copy backend/.env.example to backend/.env.
+.env
+.env.*
+!.env.example
+
+# Local runtime data (SQLite database, dev session secret)
+backend/data/
+*.db
+*.sqlite3
+
+# Tooling
+node_modules/
+.playwright-cli/
+screenshots/
+strix_runs/

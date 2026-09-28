@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Test Generator — Sign in</title>
+  <meta name="description" content="Review source code in any language, run generated tests in a sandbox, and check OpenAPI, GraphQL and JSON contracts.">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/css/app.css">
+</head>
+<body>
+<div class="signin-page">
+  <header class="signin-top">
+    <a class="brand" href="/"><img class="brand-mark" src="/assets/favicon.svg" alt="">AI Test Generator</a>
+  </header>
+
+  <main class="signin-main">
+    <section>
+      <h1>Sign in to continue</h1>
+      <p class="lead">
+        Reviews source code in any language, runs the generated tests in a sandbox, and checks
+        OpenAPI, GraphQL and JSON contracts. Every run is stored against your GitHub account and
+        repositories, so you and your team can compare results over time.
+      </p>
+
+      <div id="signin-error" class="banner error hidden" role="alert">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v6M12 16.5v.5"/></svg>
+        <div><strong id="signin-error-title">Sign-in failed</strong><span id="signin-error-text"></span></div>
+      </div>
+
+      <a class="btn btn-primary btn-github" href="/auth/github/login">
+        <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+        Sign in with GitHub
+      </a>
+      <p class="scopes">
+        GitHub will ask for read access to your profile, organizations and repositories
+        (scopes <code>read:user</code>, <code>read:org</code>, <code>repo</code>). Code you analyze is sent to
+        Google Gemini (<code>gemini-3.7-flash</code>) for review; the API key never leaves the server.
+      </p>
+    </section>
+
+    <section aria-label="What the tool does">
+      <ul class="capabilities">
+        <li>
+          <h3>Code review</h3>
+          <p>Upload or paste files in any language. Compiler and linter diagnostics, AI-reported defects with line numbers, and generated unit tests.</p>
+        </li>
+        <li>
+          <h3>Test execution</h3>
+          <p>Generated tests run in an isolated sandbox for Python, JavaScript, Go, Ruby and Rust. Failing tests are triaged as code defects or wrong expectations.</p>
+        </li>
+        <li>
+          <h3>Repository analysis</h3>
+          <p>Analyze any repository your GitHub account can read, pinned to a commit, including private and organization repositories.</p>
+        </li>
+        <li>
+          <h3>API and data contracts</h3>
+          <p>Lint OpenAPI/Swagger, validate GraphQL SDL and JSON against JSON Schema, and check a live server against its documented contract.</p>
+        </li>
+        <li>
+          <h3>History and team dashboards</h3>
+          <p>Results per project and per GitHub organization, built only from runs your team has actually made.</p>
+        </li>
+      </ul>
+    </section>
+  </main>
+
+  <footer class="signin-foot">
+    <span>AI Test Generator</span>
+    <a href="https://github.com/TanishMhalsekar01/AI-test-generator">Source code</a>
+  </footer>
+</div>
+<script type="module" src="/assets/js/signin.js"></script>
+</body>
+</html>
