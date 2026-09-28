@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+pytest
+pytest-cov
+pylint
+python-multipart
+requests
+httpx2
+pyyaml
+aiofiles
