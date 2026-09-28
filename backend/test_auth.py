@@ -74,7 +74,7 @@ def test_callback_creates_session_and_encrypts_token(anon_client):
     anon_client.cookies.set(auth.SESSION_COOKIE, raw)
     me = anon_client.get("/api/me").json()
     assert me["login"] == "octo"
-    assert me["model"] == "gemini-3.7-flash"
+    assert me["model"] == "gemini-3.1-pro-preview"
     assert "test-gemini-key" not in str(me)  # the key never reaches the browser
 
 

@@ -9,7 +9,7 @@ import github_api
 def _completed_run(user_id, login, project, owner=None, kind="repo", findings=3, failed=1):
     db.upsert_user({"id": user_id, "login": login, "name": None, "avatar_url": None})
     run_id = db.create_run(user_id=user_id, user_login=login, kind=kind, project=project, owner=owner,
-                           ref="main", commit_sha="b" * 40, model="gemini-3.7-flash")
+                           ref="main", commit_sha="b" * 40, model="gemini-3.1-pro-preview")
     db.update_run(run_id, status="completed", report={"files": []}, finished_at=db.now(), duration_ms=1200,
                   summary={"findings": findings, "critical": 1, "high": 1, "tests_passed": 4, "tests_failed": failed})
     return run_id

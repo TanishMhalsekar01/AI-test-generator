@@ -17,7 +17,7 @@ REPO_ROOT = BACKEND_DIR.parent
 FRONTEND_DIR = REPO_ROOT / "frontend"
 DATA_DIR = BACKEND_DIR / "data"
 
-DEFAULT_GEMINI_MODEL = "gemini-3.7-flash"
+DEFAULT_GEMINI_MODEL = "gemini-3.1-pro-preview"
 
 
 def load_dotenv(path: Path = BACKEND_DIR / ".env") -> None:

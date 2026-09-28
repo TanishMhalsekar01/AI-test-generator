@@ -15,11 +15,11 @@ sandbox. Only scan systems you own — here, a local copy of this app.
    Strix needs Python 3.12+.
 3. An LLM key in the environment. Reuse the project's Gemini key without writing it anywhere:
    ```bash
-   export STRIX_LLM="gemini/gemini-3.7-flash"
+   export STRIX_LLM="gemini/gemini-3.1-pro-preview"
    export LLM_API_KEY="$GEMINI_API_KEY"
    ```
-   The Gemini free tier allows 20 requests/day for this model — a scan needs far more, so use a
-   key from a project with billing enabled.
+   This model has no Gemini free-tier quota, so the key must come from a project with billing
+   enabled.
 
 ## Run
 

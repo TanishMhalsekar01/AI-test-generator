@@ -18,7 +18,7 @@ services:
       - key: APP_BASE_URL
         value: https://aitestge.stream
       - key: GEMINI_MODEL
-        value: gemini-3.7-flash
+        value: gemini-3.1-pro-preview
       - key: GEMINI_API_KEY
         sync: false
       - key: GITHUB_CLIENT_ID

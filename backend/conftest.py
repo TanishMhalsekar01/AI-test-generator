@@ -15,7 +15,7 @@ from pathlib import Path
 
 _TMP = Path(tempfile.mkdtemp(prefix="aitg-tests-"))
 os.environ["GEMINI_API_KEY"] = "test-gemini-key-000000"
-os.environ["GEMINI_MODEL"] = "gemini-3.7-flash"
+os.environ["GEMINI_MODEL"] = "gemini-3.1-pro-preview"
 os.environ["DATABASE_URL"] = f"sqlite:///{_TMP / 'test.db'}"
 os.environ["SESSION_SECRET"] = "test-session-secret-for-pytest-only"
 os.environ["APP_ENV"] = "development"

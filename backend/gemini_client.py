@@ -3,7 +3,7 @@ Minimal Google Gemini client (REST, v1beta generateContent).
 
 - The API key is read from GEMINI_API_KEY and sent only in the
   ``x-goog-api-key`` header — never in the URL, logs or error messages.
-- Only the configured model is used (default ``gemini-3.7-flash``). Transient
+- Only the configured model is used (default ``gemini-3.1-pro-preview``). Transient
   failures (429 / 5xx / network) are retried with exponential backoff; when the
   retries are exhausted a GeminiUnavailable error is raised. There is no silent
   fallback to another model and no placeholder output.
@@ -22,6 +22,10 @@ from config import get_settings, redact
 
 API_ROOT = "https://generativelanguage.googleapis.com/v1beta"
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+# Gemini counts "thinking" tokens against maxOutputTokens. Pro models can think for
+# thousands of tokens, so this is added on top of what the caller needs for the answer.
+# Only generated tokens are billed, so the higher cap costs nothing unless used.
+THINKING_TOKENS = 16384
 
 # Indirection so tests can skip real sleeping.
 _sleep = time.sleep
@@ -59,12 +63,18 @@ def _trip(error: GeminiError, seconds: float) -> GeminiError:
     return error
 
 
-def _quota_details(resp: requests.Response) -> tuple[bool, float]:
-    """Return (is_daily_quota, retry_delay_seconds) from a 429 response body."""
+def _quota_details(resp: requests.Response) -> tuple[bool, bool, float]:
+    """Return (no_quota, is_daily_quota, retry_delay_seconds) from a 429 response body.
+
+    no_quota means the key has no quota at all for the model ("limit: 0"), e.g. a
+    paid-only model on a free-tier project; waiting will not help.
+    """
     try:
-        details = resp.json().get("error", {}).get("details", [])
+        error = resp.json().get("error", {})
     except ValueError:
-        return False, 0.0
+        return False, False, 0.0
+    no_quota = re.search(r"\blimit: 0\b", str(error.get("message", ""))) is not None
+    details = error.get("details", [])
     daily, delay = False, 0.0
     for d in details:
         kind = d.get("@type", "")
@@ -75,7 +85,7 @@ def _quota_details(resp: requests.Response) -> tuple[bool, float]:
                 delay = float(str(d.get("retryDelay", "0")).rstrip("s"))
             except ValueError:
                 delay = 0.0
-    return daily, delay
+    return no_quota, daily, delay
 
 
 @dataclass
@@ -117,7 +127,7 @@ def generate(
     url = f"{API_ROOT}/models/{model}:generateContent"
     generation_config: dict[str, Any] = {
         "temperature": temperature,
-        "maxOutputTokens": max_output_tokens,
+        "maxOutputTokens": max_output_tokens + THINKING_TOKENS,
     }
     if json_mode:
         generation_config["responseMimeType"] = "application/json"
@@ -143,11 +153,19 @@ def generate(
             if resp.status_code == 200:
                 text, finish = _extract_text(resp.json())
                 if not text.strip():
+                    if finish == "MAX_TOKENS":
+                        raise GeminiError(f"{model} used its whole output token limit before answering.")
                     raise GeminiError(f"{model} returned an empty response (finishReason={finish or 'unknown'}).")
                 return GeminiResult(text=text, model=model, finish_reason=finish)
             message = _error_message(resp)
             if resp.status_code == 429:
-                daily, retry_after = _quota_details(resp)
+                no_quota, daily, retry_after = _quota_details(resp)
+                if no_quota:
+                    raise _trip(GeminiQuotaExceeded(
+                        f"{model} has no free-tier quota on this API key (Google reports a limit of 0). "
+                        "Enable billing for the project in Google AI Studio, or set GEMINI_MODEL to a model "
+                        "the key can use."
+                    ), QUOTA_COOLDOWN)
                 if daily:
                     raise _trip(GeminiQuotaExceeded(
                         f"The daily request quota for {model} on this API key is used up (Google free tier). "
@@ -193,7 +211,12 @@ def parse_json(text: str) -> Any:
 
 def generate_json(system: str, prompt: str, **kwargs) -> tuple[Any, str]:
     result = generate(system, prompt, json_mode=True, **kwargs)
-    return parse_json(result.text), result.model
+    try:
+        return parse_json(result.text), result.model
+    except GeminiError:
+        if result.finish_reason == "MAX_TOKENS":
+            raise GeminiError(f"{result.model}'s answer was cut off at the output token limit.") from None
+        raise
 
 
 def strip_fences(text: str) -> str:
