@@ -23,10 +23,6 @@ repositories, so history and team dashboards show only real, recorded results.
 | **API & data contracts** | Lint OpenAPI 3.x / Swagger 2.0, validate GraphQL SDL, and validate JSON/YAML against a JSON Schema. With a base URL, check the live server: status codes must be documented, JSON bodies must match the schema, required parameters must be enforced, and GraphQL introspection is compared with the SDL. Gemini also writes a pytest suite per operation, which runs against the live server. |
 | **History & dashboards** | The Overview shows each project's latest result and a findings trend. History lists every run, filterable by project, type and scope. Team dashboards combine live GitHub organization data (repositories, members) with runs made by organization members. |
 
-Nothing is simulated. If the AI step fails, for example because of a quota limit, the report says so
-and shows "—" instead of zero. Tests for languages without a sandbox runner are marked
-"not executed" and never counted as passed.
-
 ---
 
 ## How a run works
