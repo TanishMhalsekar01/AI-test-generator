@@ -190,60 +190,6 @@ the key in `backend/.env`. CI runs the suite on every pull request
 
 ---
 
-## GitHub OAuth App
-
-1. GitHub → **Settings → Developer settings → OAuth Apps → New OAuth App**.
-2. Homepage URL: `https://aitestge.stream`
-3. Authorization callback URL: `https://aitestge.stream/auth/github/callback`
-4. Copy the **Client ID**, generate a **Client secret**, and set both as environment variables.
-
-The app requests `read:user`, `read:org` and `repo`. Those scopes are needed to list organizations
-and to analyze private repositories. If an organization restricts third-party OAuth apps, an
-organization owner must approve the app before its repositories and members appear on the team
-dashboard.
-
-## Supabase (database)
-
-1. Create a Supabase project.
-2. Apply the schema: open the **SQL editor** and run
-   [`supabase/migrations/20260928000000_init.sql`](supabase/migrations/20260928000000_init.sql),
-   or run `supabase db push` with the Supabase CLI.
-3. **Project Settings → Database → Connection string → Session pooler**. Copy the URI, fill in the
-   database password, and set it as `DATABASE_URL`. The session pooler works over IPv4, which Render
-   requires.
-
-Row Level Security is enabled on all tables with no policies. The public Supabase API
-(anon/authenticated keys) therefore cannot read sessions or reports; only the backend's direct
-database connection can.
-
-## Deployment on Render with the custom domain
-
-1. Push this repository to GitHub. In Render: **New → Blueprint** → select the repository.
-   [`render.yaml`](render.yaml) creates the Docker web service `ai-test-generator` with a health
-   check at `/healthz` and the domains `aitestge.stream` and `www.aitestge.stream`.
-2. Enter the environment variables marked `sync: false` in the Render dashboard: `GEMINI_API_KEY`,
-   `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `DATABASE_URL` and `APP_BASE_URL` (the public URL,
-   e.g. `https://aitestge.stream`). `SESSION_SECRET` is generated automatically. See [Gemini models,
-   availability and quota](#gemini-models-availability-and-quota) for how models are chosen.
-3. **Register the domain** `aitestge.stream` with any registrar if you have not already.
-4. **DNS**: in Render, open the service → **Settings → Custom Domains** and create the records it
-   shows at your DNS provider. At the time of writing these are:
-
-   | Host | Type | Value |
-   |---|---|---|
-   | `aitestge.stream` (apex) | `A` (or `ALIAS`/`ANAME` → `ai-test-generator.onrender.com`) | `216.24.57.1` |
-   | `www` | `CNAME` | `ai-test-generator.onrender.com` |
-
-   Remove any conflicting `AAAA` records for the apex. Render issues TLS certificates automatically
-   once DNS resolves. The app forces HTTPS in production (HSTS).
-5. Update the GitHub OAuth App's callback URL to `https://aitestge.stream/auth/github/callback`.
-
-Until DNS is live, set `APP_BASE_URL` to the service's `https://<name>.onrender.com` URL and use
-`https://<name>.onrender.com/auth/github/callback` as the OAuth App's callback URL. In production, `www.aitestge.stream` redirects to `aitestge.stream` and HTTP redirects
-to HTTPS.
-
----
-
 ## Security model
 
 - **Secrets stay on the server.** The Gemini key is read from the environment, sent only in a request
@@ -291,6 +237,11 @@ All endpoints except sign-in and `/healthz` require the session cookie. Interact
 
 The `POST /api/runs/*` endpoints return `202 {"id": ...}`; poll `GET /api/runs/{id}` until
 `status` is `completed` or `failed`.
+
+---
+## Using IBM BOB for Proper Decision Making
+
+We used IBM Bob for our initial prototyping, scaffolding the project skeleton, building about half of the backend, and setting up the GUI. While it was helpful for getting those pieces off the ground, one lesson we learned is that sometimes Bob changed code outside what we asked. It renamed a core function during an unrelated edit and broke the imports. We caught it because we tested after every change. So our workflow was to scope the prompt, review the diff, run it, and then move on. We also added CI, so GitHub Actions runs 19 tests on every push
 
 ---
 
