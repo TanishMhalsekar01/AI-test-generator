@@ -6,7 +6,7 @@ API contracts: OpenAPI/Swagger documents, GraphQL schemas and JSON/YAML data, in
 against a running server. Users sign in with GitHub. Every run is stored against their account and
 repositories, so history and team dashboards show only real, recorded results.
 
-- Production URL (after DNS setup): **https://aitestge.stream**
+- Production URL (after DNS setup): **https://ai-test-generator-6bv7.onrender.com/**
 - Model: Google Gemini **`gemini-2.5-pro`**, with automatic fallback to Gemini Flash models when it
   cannot answer (server-side only)
 - Stack: FastAPI · SQLAlchemy (Supabase Postgres / SQLite) · vanilla HTML/CSS/JS · Docker on Render
