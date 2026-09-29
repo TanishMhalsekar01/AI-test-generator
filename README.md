@@ -231,9 +231,6 @@ All endpoints except sign-in and `/healthz` require the session cookie. Interact
 | GET | `/api/dashboard/overview` | Per-project latest results and trends |
 | GET | `/api/dashboard/team/{org}` | Organization dashboard (members only) |
 
-The `POST /api/runs/*` endpoints return `202 {"id": ...}`; poll `GET /api/runs/{id}` until
-`status` is `completed` or `failed`.
-
 ---
 ## Using IBM BOB for Proper Decision Making
 
