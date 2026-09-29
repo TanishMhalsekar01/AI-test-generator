@@ -132,26 +132,6 @@ Dockerfile, render.yaml
 
 ---
 
-## Configuration
-
-All settings are environment variables. For local development, copy `backend/.env.example` to
-`backend/.env`. That file is gitignored; never commit real keys.
-
-| Variable | Required | Description |
-|---|---|---|
-| `GEMINI_API_KEY` | yes (for AI) | Google AI Studio key. Used only by the server, sent in the `x-goog-api-key` header. |
-| `GEMINI_MODEL` | no | Main model, tried first. Defaults to `gemini-2.5-pro`. |
-| `GEMINI_FALLBACK_MODELS` | no | Comma-separated models tried in order when the main model cannot answer. Defaults to `gemini-3.6-flash,gemini-3-flash-preview,gemini-3.1-flash-lite`; `none` uses `GEMINI_MODEL` only. |
-| `GEMINI_MAX_RETRIES` | no | Retries on 429/5xx with exponential backoff (default 4). |
-| `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | yes | GitHub OAuth App credentials. |
-| `SESSION_SECRET` | production | Random string; encrypts stored GitHub tokens. Auto-generated for local dev. |
-| `DATABASE_URL` | production | Supabase Postgres connection string. Empty = SQLite in `backend/data/`. |
-| `APP_BASE_URL` | yes | Public URL, e.g. `https://aitestge.stream`. Builds the OAuth callback URL. |
-| `APP_ENV` | no | `production` enables HTTPS / `www` redirects, HSTS and secure cookies. |
-| `ALLOWED_HOSTS` | no | Comma-separated Host allowlist (TrustedHostMiddleware). |
-| `ALLOW_PRIVATE_TARGETS` | no | Allow live checks and spec URLs on localhost/private IPs. Default `true` in dev, `false` in production. |
-| `MAX_REPO_FILES` | no | Upper bound for files per repository run (default 25, max 100). |
-| `JOB_WORKERS` | no | Concurrent runs (default 3). |
 
 ### Gemini models, availability and quota
 
@@ -311,24 +291,6 @@ All endpoints except sign-in and `/healthz` require the session cookie. Interact
 
 The `POST /api/runs/*` endpoints return `202 {"id": ...}`; poll `GET /api/runs/{id}` until
 `status` is `completed` or `failed`.
-
----
-
-## Claude Code tooling
-
-This repository ships project-level Claude Code configuration:
-
-- **Plugins** (declared in [`.claude/settings.json`](.claude/settings.json), from
-  `anthropics/claude-plugins-official`): **Supabase** (database/auth management via MCP),
-  **Playwright** (browser automation MCP), **Context7** (up-to-date library documentation), and
-  **frontend-design** (UI implementation skill).
-- **Playwright CLI** skill in `.claude/skills/playwright-cli/` (from `@playwright/cli`), for driving a
-  browser from the terminal.
-- **Strix** security-testing skill in `.claude/skills/strix-scan/`, with instructions for running
-  [Strix](https://github.com/usestrix/strix) against a local instance. Strix needs Docker and a
-  billed LLM key.
-- [`scripts/setup-dev-tools.sh`](scripts/setup-dev-tools.sh) installs all of the above on a
-  developer machine.
 
 ---
 
